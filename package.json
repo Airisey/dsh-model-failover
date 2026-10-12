@@ -1,0 +1,46 @@
+{
+  "name": "dsh-model-failover",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "模型接力 — 把已接入 dsh 的全部模型排成一条优先级队列，用它当模型跑任务：额度耗尽或模型无法输出时自动重试「继续」，再不行就切到下一个模型，直到任务跑完；当天出过问题的模型会被隔离，次日设定时间后自动复活。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "llm-provider",
+    "failover",
+    "model-router"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "license": "MIT"
+}

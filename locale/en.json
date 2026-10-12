@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model Relay",
+    "description": "Runs tasks through a priority queue of every model connected to dsh: retries the same model once with a continuation prompt, then fails over to the next, and quarantines today's broken models until the configured reset hour."
+  }
+}
