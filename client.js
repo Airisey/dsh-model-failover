@@ -129,6 +129,17 @@ window.__ModuleLoader__.load({
         optAllQuarantinedHint: '关掉后队列里全是隔离模型时会直接报错，不再尝试。',
         optKeepLog: '记录事件日志',
         optLogLimit: '最多保留',
+        auto: '自动「继续」',
+        optAutoContinue: '本轮失败或输出撞上限时自动「继续」',
+        optAutoContinueHint: '一轮结束、dsh 报错或被 token 上限截断时，替你再发一句话，接着往下做。',
+        optAutoOnFailure: '本轮运行失败时',
+        optAutoOnMaxTokens: '输出撞到 token 上限、被截断时',
+        optAutoLimit: '同一段失败里最多自动补发',
+        optAutoLimitHint: '用满就停手，等你发下一句；你手动发言或本轮正常结束都会重新计数。',
+        times: '次',
+        evAutoContinue: '本轮{trigger}，自动补发「继续」',
+        trigMaxTokens: '输出撞到上限',
+        trigError: '运行失败',
         count: '条',
         events: '事件日志',
         clearLog: '清空日志',
@@ -194,6 +205,17 @@ window.__ModuleLoader__.load({
         optAllQuarantinedHint: 'Turned off, an all-quarantined queue fails immediately.',
         optKeepLog: 'Keep an event log',
         optLogLimit: 'Keep at most',
+        auto: 'Automatic “continue”',
+        optAutoContinue: 'Auto-send “continue” on failure or a truncated answer',
+        optAutoContinueHint: 'When a turn ends in an error or is cut off by the token ceiling, send one more message on your behalf.',
+        optAutoOnFailure: 'The turn failed',
+        optAutoOnMaxTokens: 'The answer hit the token ceiling',
+        optAutoLimit: 'Send at most',
+        optAutoLimitHint: 'Then it stops and waits for you; your next message or a clean turn resets the count.',
+        times: 'time(s)',
+        evAutoContinue: 'Turn {trigger} — sent “continue” automatically',
+        trigMaxTokens: 'hit the token ceiling',
+        trigError: 'failed',
         count: 'entries',
         events: 'Event log',
         clearLog: 'Clear log',
@@ -497,6 +519,9 @@ window.__ModuleLoader__.load({
           case 'forget':
             body = t('evForget')
             break
+          case 'auto-continue':
+            body = t('evAutoContinue', { trigger: t(event.trigger === 'max-tokens' ? 'trigMaxTokens' : 'trigError') })
+            break
           default:
             body = `${event.kind ?? '?'}`
         }
@@ -700,6 +725,43 @@ window.__ModuleLoader__.load({
               }),
               span({ className: 'mf-note' }, t('count')),
             ),
+        ),
+
+        // ── 自动「继续」 ────────────────────────────────────────────────────
+        Card({ title: t('auto') },
+          h(ToggleRow, {
+            label: t('optAutoContinue'),
+            hint: t('optAutoContinueHint'),
+            checked: settings.autoContinue !== false,
+            disabled: busy,
+            onChange: (value) => void run('/settings', { autoContinue: value }),
+          }),
+          h(ToggleRow, {
+            label: t('optAutoOnFailure'),
+            checked: settings.autoContinueOnFailure !== false,
+            disabled: busy || settings.autoContinue === false,
+            onChange: (value) => void run('/settings', { autoContinueOnFailure: value }),
+          }),
+          h(ToggleRow, {
+            label: t('optAutoOnMaxTokens'),
+            checked: settings.autoContinueOnMaxTokens !== false,
+            disabled: busy || settings.autoContinue === false,
+            onChange: (value) => void run('/settings', { autoContinueOnMaxTokens: value }),
+          }),
+          div({ className: 'mf-opt' },
+            div({ className: 'mf-opt-main' },
+              div(null, t('optAutoLimit')),
+              div({ className: 'mf-note' }, t('optAutoLimitHint')),
+            ),
+            h(NumberInput, {
+              value: settings.autoContinueLimit,
+              min: 1,
+              max: 20,
+              disabled: busy || settings.autoContinue === false,
+              onCommit: (value) => { if (value !== settings.autoContinueLimit) void run('/settings', { autoContinueLimit: value }) },
+            }),
+            span({ className: 'mf-note' }, t('times')),
+          ),
         ),
 
         // ── 事件日志 ────────────────────────────────────────────────────────

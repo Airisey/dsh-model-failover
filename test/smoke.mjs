@@ -720,6 +720,131 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
   }
 })
 
+// 14 · 「自动继续」的宿主接线
+await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继续」', async () => {
+  const freshHome = mkdtempSync(join(tmpdir(), 'model-failover-auto-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = freshHome
+  try {
+    const llm = createLlm(new Map())
+    llm.register('alpha', [{ id: 'one', name: 'Alpha One' }])
+    llm.registerAdapter = () => () => {}
+    llm.registerConfigurableProviders = () => ({ replace: () => {}, dispose: () => {}, entries: [] })
+
+    const sent = []
+    const session = { id: 's1' }
+    const agent = {
+      status: 'idle',
+      inbox: { hasPending: false },
+      async whenIdle() {},
+      followup: (message) => sent.push(message),
+    }
+    const agents = { get: (id) => (id === 's1' ? agent : undefined) }
+
+    const listeners = new Map()
+    const scoped = (extra) => ({
+      ...extra,
+      effect: (fn) => { fn(); return () => {} },
+      on: (type, fn) => { listeners.set(type, fn); return () => listeners.delete(type) },
+    })
+
+    let sawAgentsInject = false
+    let handler
+    const ctx = {
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      llm,
+      get: () => undefined,
+      fiber: { entry: { options: { id: 'model-failover' } } },
+      effect: (fn) => { fn(); return () => {} },
+      inject(names, callback) {
+        if (names.includes('webServer')) {
+          callback(scoped({
+            webServer: { register: (route) => { handler = route.handler; return () => {} } },
+          }))
+        }
+        if (names.includes('agents')) {
+          sawAgentsInject = true
+          callback(scoped({ agents }))
+        }
+      },
+    }
+
+    const mod = await import('../index.js')
+    mod.apply(ctx, {})
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    assert.equal(sawAgentsInject, true, '应通过 ctx.inject 申请 agents 服务')
+    assert.equal(typeof listeners.get('session/event'), 'function', '应挂上 session/event 监听')
+
+    const LOOPBACK = { host: '127.0.0.1:19387' }
+    const call = async (method, path, body, headers = LOOPBACK) => {
+      const response = { status: 0, body: '', writeHead(status) { this.status = status }, end(payload) { this.body = payload ?? '' } }
+      await handler({ method, url: path, headers, ...(body === undefined ? {} : { [Symbol.asyncIterator]: async function* () { yield Buffer.from(JSON.stringify(body)) } }) }, response)
+      return { status: response.status, json: JSON.parse(response.body) }
+    }
+
+    const fire = (type, data) => listeners.get('session/event')(session, { type, data })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+    // 输出撞上限 → 补发
+    fire('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+    await settle()
+    assert.equal(sent.length, 1, '输出撞上限时应补发一句')
+    assert.equal(sent[0].role, 'user')
+    assert.equal(sent[0].content[0].text, '继续')
+
+    // 我们补发的那一轮开始并再次失败 → 再补发一次
+    fire('turn/start', { turn: 2 })
+    fire('turn/end', { turn: 2, reason: { kind: 'error', error: { code: 'SERVER', message: 'boom' } } })
+    await settle()
+    assert.equal(sent.length, 2, '本轮运行失败时也应补发')
+
+    // 第三轮正常收尾 → 一条都不该补
+    fire('turn/start', { turn: 3 })
+    fire('turn/end', { turn: 3, reason: { kind: 'completed' } })
+    await settle()
+    assert.equal(sent.length, 2, '正常结束不该补发')
+
+    // 用户中止 → 一条都不该补
+    fire('turn/end', { turn: 4, reason: { kind: 'aborted' } })
+    await settle()
+    assert.equal(sent.length, 2, '用户喊停后绝不能替他再发一句')
+
+    // ── 设置真的能摁住它 ────────────────────────────────────────────────────
+    const off = await call('POST', '/api/dsh-model-failover/settings', { autoContinue: false })
+    assert.equal(off.status, 200)
+    assert.equal(off.json.settings.autoContinue, false)
+
+    fire('turn/start', { turn: 5 })
+    fire('turn/end', { turn: 5, reason: { kind: 'max-tokens' } })
+    fire('turn/end', { turn: 5, reason: { kind: 'error', error: { code: 'SERVER' } } })
+    await settle()
+    assert.equal(sent.length, 2, '总开关关掉后不该再补发')
+
+    // 只关「输出撞上限」，失败照补。
+    const partial = await call('POST', '/api/dsh-model-failover/settings', {
+      autoContinue: true,
+      autoContinueOnMaxTokens: false,
+    })
+    assert.equal(partial.status, 200)
+    assert.equal(partial.json.settings.autoContinueOnMaxTokens, false)
+
+    fire('turn/start', { turn: 6 })
+    fire('turn/end', { turn: 6, reason: { kind: 'max-tokens' } })
+    await settle()
+    assert.equal(sent.length, 2, '分项关掉后撞上限不该补发')
+
+    fire('turn/start', { turn: 7 })
+    fire('turn/end', { turn: 7, reason: { kind: 'error', error: { code: 'SERVER' } } })
+    await settle()
+    assert.equal(sent.length, 3, '本轮失败仍应补发')
+    assert.equal(sent[2].content[0].text, '继续')
+  } finally {
+    process.env.DSH_HOME = previous
+    rmSync(freshHome, { recursive: true, force: true })
+  }
+})
+
 rmSync(HOME, { recursive: true, force: true })
 
 console.log(`\n${passed} 通过 / ${failed} 失败`)

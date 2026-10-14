@@ -296,6 +296,10 @@ const initialState = () => ({
     continueText: '继续',
     hiddenProviders: [],
     retryWhenAllQuarantined: true,
+    autoContinue: true,
+    autoContinueOnFailure: true,
+    autoContinueOnMaxTokens: true,
+    autoContinueLimit: 3,
     keepEventLog: true,
     eventLogLimit: 200,
   },
@@ -516,7 +520,7 @@ globalThis.fetch = async (url, init = {}) => {
           ? { provider: item.provider, model: item.model }
           : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort }))
       }
-      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueLimit']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -686,6 +690,98 @@ await check('乱敲的重置时间被丢弃，不会发 POST', async () => {
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 0, '非整数应该被丢掉，而不是把 NaN 发给宿主')
   assert.equal(hourInput().props.value, '23', '输入框应回滚到宿主的值')
+})
+
+await check('自动「继续」：三个开关 + 次数上限都在，且反映宿主设置', () => {
+  const toggle = (label) => runtime.find((node) => node.props['aria-label'] === label)
+  for (const label of ['optAutoContinue', 'optAutoOnFailure', 'optAutoOnMaxTokens']) {
+    assert.equal(toggle(label).props['aria-pressed'], 'true', `${label} 应反映当前设置`)
+    assert.equal(toggle(label).props.disabled, false, `${label} 在总开关打开时应可点`)
+  }
+  const limit = runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
+  )
+  assert.equal(limit.props.value, '3', '次数上限应显示宿主的值')
+})
+
+await check('自动「继续」总开关关掉后，两个分项和次数上限一起置灰', async () => {
+  const before = requests.length
+  await runtime.find((node) => node.props['aria-label'] === 'optAutoContinue').props.onClick()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { autoContinue: false })
+
+  const toggle = (label) => runtime.find((node) => node.props['aria-label'] === label)
+  assert.equal(toggle('optAutoOnFailure').props.disabled, true, '总开关关了，分项没意义')
+  assert.equal(toggle('optAutoOnMaxTokens').props.disabled, true)
+  const limit = runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
+  )
+  assert.equal(limit.props.disabled, true)
+
+  // 恢复，免得影响后面的用例。
+  await toggle('optAutoContinue').props.onClick()
+  await runtime.mount(page(props))
+})
+
+await check('关掉「输出撞上限」这一项，POST 的是它自己的键', async () => {
+  const before = requests.length
+  await runtime.find((node) => node.props['aria-label'] === 'optAutoOnMaxTokens').props.onClick()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { autoContinueOnMaxTokens: false })
+
+  await runtime.find((node) => node.props['aria-label'] === 'optAutoOnMaxTokens').props.onClick()
+  await runtime.mount(page(props))
+})
+
+await check('次数上限失焦后 POST autoContinueLimit，超范围夹到 1-20', async () => {
+  const limitInput = () => runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
+  )
+  const before = requests.length
+  limitInput().props.onChange({ target: { value: '99' } })
+  await runtime.mount(page(props))
+  assert.equal(limitInput().props.value, '99', '输入框应保留用户敲进去的草稿')
+  limitInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { autoContinueLimit: 20 })
+  assert.equal(current.settings.autoContinueLimit, 20)
+})
+
+await check('自动补发事件在日志里有自己的文案，不会漏出裸 kind', async () => {
+  // 必须开一个全新的 Runtime：hook 单元按「路径 + 类型名」跨 mount 复用，
+  // 老的 Runtime 里那次 GET 早已跑过，改 current.events 再 mount 也刷不出来。
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  state.events = [
+    { at: Date.now(), kind: 'auto-continue', trigger: 'max-tokens', sessionId: 's1', turn: 3, text: '继续' },
+    { at: Date.now(), kind: 'auto-continue', trigger: 'error', sessionId: 's1', turn: 4, text: '继续' },
+  ]
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(state) })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(page(props)))
+  } finally {
+    globalThis.fetch = saved
+  }
+
+  assert.ok(flat.includes('evAutoContinue'), `auto-continue 应走专属文案，实际：${flat.slice(-260)}`)
+  assert.equal(flat.includes('auto-continue'), false, '不该把裸的 kind 直接摊给用户看')
+
+  // 这个桩里的 t() 只回 key，插值得直接查字典。
+  const zh = dictionaries.get('settings.modelFailover').zh
+  assert.ok(zh.evAutoContinue.includes('{trigger}'), '文案要留出触发原因的插槽')
+  assert.ok(zh.trigMaxTokens.includes('上限'))
+  assert.ok(zh.trigError.length > 0)
 })
 
 await check('清空事件日志走 /log/clear', async () => {

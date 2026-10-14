@@ -23,6 +23,7 @@
 import { join } from 'node:path'
 
 import { FailoverAdapter } from './lib/adapter.js'
+import { AutoContinue } from './lib/autocontinue.js'
 import { Catalog } from './lib/catalog.js'
 import {
   API_PREFIX,
@@ -57,13 +58,16 @@ const EVENTS_IN_SNAPSHOT = 80
 /** 事件日志文件的读入上限；超出部分在 normalize 阶段丢弃。 */
 const EVENT_LOG_HARD_LIMIT = 2000
 
+/** 「自动继续」连续补发次数的硬上限：再大就只是把同一堵墙撞更多次。 */
+const AUTO_CONTINUE_HARD_LIMIT = 20
+
 /**
  * 把任意 JSON 收敛成设置形状。任何一项缺失或类型不对都回落到默认值。
  *
  * 队列顺序顺便在这里去重：重复的候选只会让同一次失败被重复尝试两遍，
  * 而它的代价（多烧一次上游额度）远大于在这里多写四行。
  */
-function normalizeSettings(raw) {
+export function normalizeSettings(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
 
   const order = []
@@ -100,6 +104,11 @@ function normalizeSettings(raw) {
       ? Math.min(source.eventLogLimit, EVENT_LOG_HARD_LIMIT)
       : DEFAULT_SETTINGS.eventLogLimit
 
+  const autoContinueLimit =
+    Number.isInteger(source.autoContinueLimit) && source.autoContinueLimit > 0
+      ? Math.min(source.autoContinueLimit, AUTO_CONTINUE_HARD_LIMIT)
+      : DEFAULT_SETTINGS.autoContinueLimit
+
   return {
     enabled: source.enabled !== false,
     bootstrapped: source.bootstrapped === true,
@@ -112,6 +121,10 @@ function normalizeSettings(raw) {
         : DEFAULT_SETTINGS.continueText,
     hiddenProviders,
     retryWhenAllQuarantined: source.retryWhenAllQuarantined !== false,
+    autoContinue: source.autoContinue !== false,
+    autoContinueOnFailure: source.autoContinueOnFailure !== false,
+    autoContinueOnMaxTokens: source.autoContinueOnMaxTokens !== false,
+    autoContinueLimit,
     keepEventLog: source.keepEventLog !== false,
     eventLogLimit,
   }
@@ -303,6 +316,10 @@ export function apply(ctx, _config) {
     if ('continueText' in patch) next.continueText = patch.continueText
     if ('hiddenProviders' in patch) next.hiddenProviders = patch.hiddenProviders
     if ('retryWhenAllQuarantined' in patch) next.retryWhenAllQuarantined = patch.retryWhenAllQuarantined !== false
+    if ('autoContinue' in patch) next.autoContinue = patch.autoContinue !== false
+    if ('autoContinueOnFailure' in patch) next.autoContinueOnFailure = patch.autoContinueOnFailure !== false
+    if ('autoContinueOnMaxTokens' in patch) next.autoContinueOnMaxTokens = patch.autoContinueOnMaxTokens !== false
+    if ('autoContinueLimit' in patch) next.autoContinueLimit = patch.autoContinueLimit
     if ('keepEventLog' in patch) next.keepEventLog = patch.keepEventLog !== false
     if ('eventLogLimit' in patch) next.eventLogLimit = patch.eventLogLimit
     // replace 会过一遍 normalizeSettings，所以非法值在这里被就地修好，
@@ -407,6 +424,23 @@ export function apply(ctx, _config) {
       'model-failover: settings API',
     )
     logger.info?.(`model-failover: 设置接口已挂载到 ${API_PREFIX}`)
+  })
+
+  // ── 本轮失败 / 输出撞上限时，自动补一句「继续」 ────────────────────────────
+  // `agents` 和 `webServer` 一样**故意不写进 inject**：headless 组合（TUI、
+  // 离线测试）里没有它，写进去会让整个插件静默不加载，连接力一起丢掉。
+  ctx.inject(['agents'], (scoped) => {
+    const autoContinue = new AutoContinue({
+      agents: scoped.agents,
+      settings: settingsFile,
+      log: {
+        info: (message) => logger.info?.(`model-failover: ${message}`),
+        warn: (message) => logger.warn?.(`model-failover: ${message}`),
+        push: (event) => pushEvent(event),
+      },
+    })
+    scoped.effect(() => autoContinue.attach(scoped), 'model-failover: auto continue')
+    logger.info?.('model-failover: 已接管「本轮失败 / 输出撞上限」时的自动「继续」')
   })
 
   // ── 收摊 ────────────────────────────────────────────────────────────────
