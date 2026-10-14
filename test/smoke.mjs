@@ -65,6 +65,30 @@ const noAdapter = () => async function* () {
   yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: '这条路由没挂适配器' } } }
 }
 
+/** 本机 DNS 挂了 —— 逐字抄自 2026-10-14 的真实事件日志（code 是 SERVER）。 */
+const localNetwork = () => async function* () {
+  yield {
+    type: 'finish',
+    reason: {
+      kind: 'error',
+      failure: {
+        code: 'SERVER',
+        message: 'workbuddy: cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed',
+      },
+    },
+  }
+}
+
+/** 链路层错误码，message 里什么都没说（模拟只给 code 的适配器）。 */
+const transportFail = () => async function* () {
+  yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'trae: transport error' } } }
+}
+
+/** 远端 5xx：不是本机网络问题，该照常带「继续」重试。 */
+const upstream5xx = () => async function* () {
+  yield { type: 'finish', reason: { kind: 'error', failure: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } } }
+}
+
 /**
  * 每个模型自己的思考强度档位表（真实宿主里由 `resolveModelInfo` 给出）。
  *
@@ -343,6 +367,84 @@ await check('失败一次、补一句「继续」就写完：不隔离，并记�
   const view = h.health.view(h.clock.ms, 1)
   assert.equal(view.quarantined.length, 0, '它产出内容了，不算今天出不了东西')
   assert.deepEqual(view.good.map((row) => row.key), [routeKey('alpha', 'one')], '应该记成当天已验证可用')
+})
+
+// 5c · 本机网络没通时不带「继续」
+await check('本机网络故障：重试与换人都不带「继续」（网线没通，继续是空话）', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), localNetwork()],
+      [routeKey('beta', 'one'), ok('网络回魂了')],
+    ]),
+  })
+
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写一首诗')] }))
+  assert.equal(textOf(chunks), '网络回魂了')
+
+  // 本机网络挂掉时，alpha 的两跳都不该带「继续」；换到 beta 也不该带。
+  for (const call of h.llm.calls) {
+    assert.equal(
+      lastUserText(call.messages),
+      '写一首诗',
+      `${call.key} 不该带「继续」，实际最后一条是：${lastUserText(call.messages)}`,
+    )
+    assert.equal(call.messages.length, 1, `${call.key} 不该往请求里追加消息`)
+  }
+})
+
+await check('链路层错误码（TRANSPORT）：同样不带「继续」', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), transportFail()],
+      [routeKey('beta', 'one'), ok('好了')],
+    ]),
+  })
+
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写一首诗')] }))
+  for (const call of h.llm.calls) {
+    assert.equal(lastUserText(call.messages), '写一首诗', `${call.key} 不该带「继续」`)
+  }
+})
+
+await check('远端 5xx 照旧带「继续」—— 网络判据不能把该救的失败一起摁掉', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), upstream5xx()],
+      [routeKey('beta', 'one'), ok('顶上了')],
+    ]),
+  })
+
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写一首诗')] }))
+  assert.deepEqual(commands(h.llm), [
+    routeKey('alpha', 'one'),
+    routeKey('alpha', 'one'),
+    routeKey('beta', 'one'),
+  ], '远端 5xx 仍应走「重发一次 → 换人」')
+
+  // 第二跳与换人都该带上「继续」。
+  assert.equal(lastUserText(h.llm.calls[1].messages), '继续')
+  assert.equal(lastUserText(h.llm.calls[2].messages), '继续')
+})
+
+await check('本机网络故障仍会隔离 —— 隔离语义没被这次改动动过', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), localNetwork()],
+      [routeKey('beta', 'one'), ok('顶上')],
+    ]),
+  })
+
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写一首诗')] }))
+  const view = h.health.view(h.clock.ms, 1)
+  assert.deepEqual(view.quarantined.map((row) => row.key), [routeKey('alpha', 'one')], '本机网络挂掉确实产不出东西，该隔离')
+  // 隔离日志里的 continues 应该是 0 —— 它如实记录了「这一跳没带继续」。
+  const row = h.events.find((event) => event.kind === 'quarantine')
+  assert.equal(row.continues, 0, '日志要如实反映没带「继续」')
+  assert.equal(row.code, 'SERVER')
 })
 
 // 6 · 跨过重置时间后复活
@@ -810,16 +912,43 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
     await settle()
     assert.equal(sent.length, 2, '用户喊停后绝不能替他再发一句')
 
+    // 本机网络没通 → 一条都不该补（网线没通，重发只是白烧一次上限）
+    fire('turn/end', {
+      turn: 5,
+      reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'trae: transport error: fetch failed' } },
+    })
+    fire('turn/end', {
+      turn: 6,
+      reason: { kind: 'error', error: { code: 'SERVER', message: 'cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed' } },
+    })
+    await settle()
+    assert.equal(sent.length, 2, '本机网络问题不该补发「继续」')
+
+    // 但用户得能在事件日志里看见「为什么没继续」，否则会以为插件坏了。
+    const afterNetwork = await call('GET', '/api/dsh-model-failover/state')
+    assert.equal(afterNetwork.status, 200)
+    const skipped = afterNetwork.json.events.filter((event) => event.kind === 'auto-continue-skipped')
+    assert.equal(skipped.length, 2, '两次本机网络失败都该在日志里留痕')
+    assert.equal(skipped[0].code, 'SERVER', '日志要带上原始的 code')
+    assert.equal(skipped[0].trigger, 'network')
+    assert.ok(skipped[0].message.includes('ENOTFOUND'), '日志要留下原始报错，便于排查')
+
+    // 远端的问题照旧补发 —— 不能因为加了网络判据就把该救的失败一起摁掉。
+    fire('turn/start', { turn: 7 })
+    fire('turn/end', { turn: 7, reason: { kind: 'error', error: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } } })
+    await settle()
+    assert.equal(sent.length, 3, '远端 5xx 仍应补发')
+
     // ── 设置真的能摁住它 ────────────────────────────────────────────────────
     const off = await call('POST', '/api/dsh-model-failover/settings', { autoContinue: false })
     assert.equal(off.status, 200)
     assert.equal(off.json.settings.autoContinue, false)
 
-    fire('turn/start', { turn: 5 })
-    fire('turn/end', { turn: 5, reason: { kind: 'max-tokens' } })
-    fire('turn/end', { turn: 5, reason: { kind: 'error', error: { code: 'SERVER' } } })
+    fire('turn/start', { turn: 8 })
+    fire('turn/end', { turn: 8, reason: { kind: 'max-tokens' } })
+    fire('turn/end', { turn: 8, reason: { kind: 'error', error: { code: 'SERVER' } } })
     await settle()
-    assert.equal(sent.length, 2, '总开关关掉后不该再补发')
+    assert.equal(sent.length, 3, '总开关关掉后不该再补发')
 
     // 只关「输出撞上限」，失败照补。
     const partial = await call('POST', '/api/dsh-model-failover/settings', {
@@ -829,16 +958,16 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
     assert.equal(partial.status, 200)
     assert.equal(partial.json.settings.autoContinueOnMaxTokens, false)
 
-    fire('turn/start', { turn: 6 })
-    fire('turn/end', { turn: 6, reason: { kind: 'max-tokens' } })
+    fire('turn/start', { turn: 9 })
+    fire('turn/end', { turn: 9, reason: { kind: 'max-tokens' } })
     await settle()
-    assert.equal(sent.length, 2, '分项关掉后撞上限不该补发')
+    assert.equal(sent.length, 3, '分项关掉后撞上限不该补发')
 
-    fire('turn/start', { turn: 7 })
-    fire('turn/end', { turn: 7, reason: { kind: 'error', error: { code: 'SERVER' } } })
+    fire('turn/start', { turn: 10 })
+    fire('turn/end', { turn: 10, reason: { kind: 'error', error: { code: 'SERVER' } } })
     await settle()
-    assert.equal(sent.length, 3, '本轮失败仍应补发')
-    assert.equal(sent[2].content[0].text, '继续')
+    assert.equal(sent.length, 4, '本轮失败仍应补发')
+    assert.equal(sent[3].content[0].text, '继续')
   } finally {
     process.env.DSH_HOME = previous
     rmSync(freshHome, { recursive: true, force: true })

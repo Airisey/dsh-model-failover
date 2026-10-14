@@ -53,6 +53,19 @@
 用满就停手等你；**你自己发下一句话**、或某一轮正常做完，计数就重新开始。
 上下文超长、没挂适配器、凭证失效这三类错误直接跳过 —— 重发一遍只会撞同一堵墙。
 
+**本机网络没通的时候也不会补发。** 这条单独拿出来说，是因为本机网络故障在 DSH 里
+**没有专属错误码**：DNS 解析不了、代理没起来、证书被本机拦截，各家适配器会分别报成
+`SERVER`、`TRANSPORT`、`UNKNOWN`。所以插件不认错误码，而是认**报错文本**里的本机特征
+（`ENOTFOUND` / `EAI_AGAIN` / `ECONNREFUSED` / `socket hang up` / `fetch failed` /
+`local name resolution failed` / `tunnel_destination_denied` / 证书拦截等）。
+网线没通的时候，补一句「继续」既救不回来、又要白烧一次上限，还会把整个接力队列
+一个个隔离掉 —— 所以这时插件停下来，只在事件日志里记一条
+「本轮是本机网络问题（`SERVER`），没有补发『继续』」，让你知道是网络的事、不是插件坏了。
+
+反过来，**远端**的问题照旧会补「继续」：上游 5xx、限流、模型太慢都还是要救的。
+判据特意写得很具体（`upstream returned 502 Bad Gateway`、`request timed out` 这些
+都不会被误判成本机网络），宁可漏判也不误判。
+
 自动补发会在事件日志里记成一条「本轮…，自动补发『继续』」。
 
 
@@ -107,10 +120,10 @@
 ## 开发
 
 ```
-node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线（21 项）
-node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求（24 项）
-node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（9 项）
-node test/autocontinue.mjs # 自动「继续」的判定与节流（27 项）
+node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线（25 项）
+node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求（25 项）
+node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（10 项）
+node test/autocontinue.mjs # 自动「继续」的判定与节流、本机网络判据（35 项）
 ```
 
 `test/client.mjs` 里有一个几十行的 React 替身，它把 `client.js` 当真实 bundle 加载

@@ -140,6 +140,7 @@ window.__ModuleLoader__.load({
         evAutoContinue: '本轮{trigger}，自动补发「继续」',
         trigMaxTokens: '输出撞到上限',
         trigError: '运行失败',
+        evAutoContinueSkipped: '本轮是本机网络问题（{code}），没有补发「继续」',
         count: '条',
         events: '事件日志',
         clearLog: '清空日志',
@@ -216,6 +217,7 @@ window.__ModuleLoader__.load({
         evAutoContinue: 'Turn {trigger} — sent “continue” automatically',
         trigMaxTokens: 'hit the token ceiling',
         trigError: 'failed',
+        evAutoContinueSkipped: 'Local network problem ({code}) — no “continue” was sent',
         count: 'entries',
         events: 'Event log',
         clearLog: 'Clear log',
@@ -521,6 +523,9 @@ window.__ModuleLoader__.load({
             break
           case 'auto-continue':
             body = t('evAutoContinue', { trigger: t(event.trigger === 'max-tokens' ? 'trigMaxTokens' : 'trigError') })
+            break
+          case 'auto-continue-skipped':
+            body = t('evAutoContinueSkipped', { code: event.code ?? '?' })
             break
           default:
             body = `${event.kind ?? '?'}`

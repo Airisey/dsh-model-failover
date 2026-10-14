@@ -101,6 +101,18 @@ class StubAdapter extends LlmAdapter {
 const QUOTA = { kind: 'error', failure: { message: '余额不足', code: 'QUOTA' } }
 const OK = (text) => ({ kind: 'text', text })
 
+/** 本机 DNS 挂了 —— message 逐字抄自 2026-10-14 的真实事件日志，code 却是 SERVER。 */
+const LOCAL_NETWORK = {
+  kind: 'error',
+  failure: {
+    message: 'workbuddy: cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed',
+    code: 'SERVER',
+  },
+}
+
+/** 远端 5xx：不是本机网络问题，该照常带「继续」。 */
+const UPSTREAM_5XX = { kind: 'error', failure: { message: 'upstream returned 502 Bad Gateway', code: 'SERVER' } }
+
 const lastText = (messages) =>
   messages
     .at(-1)
@@ -433,6 +445,48 @@ await check('真注册表：已经吐出正文之后就不换人了，错误照�
     assert.equal(delta.calls.length, 0, '正文已经出去了，换人会把两段话拼在一起')
   } finally {
     h.dispose()
+  }
+})
+
+await check('真注册表：本机网络故障时不带「继续」，但远端 5xx 照带', async () => {
+  const alpha = new StubAdapter('alpha', () => LOCAL_NETWORK)
+  const beta = new StubAdapter('beta', () => OK('网络回魂了'))
+  const h = await boot({
+    order: [
+      { provider: 'alpha', model: 'one' },
+      { provider: 'beta', model: 'one' },
+    ],
+    adapters: { alpha, beta },
+  })
+  try {
+    const result = await h.stream()
+    assert.equal(result.text, '网络回魂了')
+
+    // 本机网络没通：alpha 的两跳、以及换到 beta 的那一跳，都不该带「继续」。
+    for (const call of [...alpha.calls, ...beta.calls]) {
+      assert.equal(shape(call.messages), 'user:写一首诗', '本机网络故障时不该往请求里追加「继续」')
+    }
+  } finally {
+    h.dispose()
+  }
+
+  // 对照组：同样 code=SERVER，但 message 是远端 5xx —— 该照常带「继续」。
+  const gamma = new StubAdapter('gamma', () => UPSTREAM_5XX)
+  const delta = new StubAdapter('delta', () => OK('顶上了'))
+  const h2 = await boot({
+    order: [
+      { provider: 'gamma', model: 'one' },
+      { provider: 'delta', model: 'one' },
+    ],
+    adapters: { gamma, delta },
+  })
+  try {
+    const result = await h2.stream()
+    assert.equal(result.text, '顶上了')
+    assert.equal(shape(gamma.calls[1].messages), 'user:写一首诗 → user:继续', '远端 5xx 该带「继续」重发')
+    assert.equal(shape(delta.calls[0].messages), 'user:写一首诗 → user:继续', '换人也该带「继续」')
+  } finally {
+    h2.dispose()
   }
 })
 

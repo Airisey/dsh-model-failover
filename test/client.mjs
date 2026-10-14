@@ -784,6 +784,31 @@ await check('自动补发事件在日志里有自己的文案，不会漏出裸 
   assert.ok(zh.trigError.length > 0)
 })
 
+await check('本机网络跳过补发的事件也有专属文案，带上原始 code', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  state.events = [
+    { at: Date.now(), kind: 'auto-continue-skipped', trigger: 'network', sessionId: 's1', turn: 5, code: 'TRANSPORT', message: 'trae: transport error: fetch failed' },
+    { at: Date.now(), kind: 'auto-continue-skipped', trigger: 'network', sessionId: 's1', turn: 6, code: 'SERVER', message: 'ENOTFOUND' },
+  ]
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(state) })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(page(props)))
+  } finally {
+    globalThis.fetch = saved
+  }
+
+  assert.ok(flat.includes('evAutoContinueSkipped'), `应走专属文案，实际：${flat.slice(-260)}`)
+  assert.equal(flat.includes('auto-continue-skipped'), false, '不该把裸的 kind 直接摊给用户看')
+
+  const zh = dictionaries.get('settings.modelFailover').zh
+  assert.ok(zh.evAutoContinueSkipped.includes('{code}'), '文案要留出 code 的插槽')
+  assert.ok(zh.evAutoContinueSkipped.includes('网络'), '要让用户一眼看出是本机网络的问题')
+  assert.ok(dictionaries.get('settings.modelFailover').en.evAutoContinueSkipped.length > 0, '英文文案不能缺')
+})
+
 await check('清空事件日志走 /log/clear', async () => {
   const before = requests.length
   const clear = runtime.button('clearLog')

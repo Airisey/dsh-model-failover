@@ -17,6 +17,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'model-failover-auto-'))
 
 const { AutoContinue, autoContinueTrigger, continueUserMessage, AUTO_CONTINUE_SKIP_CODES } =
   await import('../lib/autocontinue.js')
+const { LOCAL_NETWORK_CODES, isLocalNetworkFailure } = await import('../lib/network.js')
 const { DEFAULT_SETTINGS } = await import('../lib/constants.js')
 const { normalizeSettings } = await import('../index.js')
 
@@ -125,9 +126,114 @@ await check('上下文超长 / 没有适配器 / 凭证无效 → 不触发（�
     )
   }
   // 额度/限流类恰恰是要救回来的那批，必须在触发集合里。
-  for (const code of ['QUOTA_EXCEEDED', 'ACCOUNT_QUOTA_EXCEEDED', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE']) {
+  // 注意 TIMEOUT / TRANSPORT 不在此列 —— 它们是链路层失败，走本机网络那条规则。
+  for (const code of ['QUOTA_EXCEEDED', 'ACCOUNT_QUOTA_EXCEEDED', 'RATE_LIMIT', 'SERVER', 'EMPTY_RESPONSE']) {
     assert.equal(autoContinueTrigger({ kind: 'error', error: { code } }, settingsOf()), 'error', `${code} 应该触发`)
   }
+})
+
+// ── 本机网络问题不补发 ──────────────────────────────────────────────────────
+
+process.stdout.write('autocontinue: 本机网络问题不补发「继续」\n')
+
+await check('链路层错误码（TRANSPORT）→ 不触发', () => {
+  for (const code of LOCAL_NETWORK_CODES) {
+    assert.equal(isLocalNetworkFailure({ code }), true, `${code} 应判为本机网络`)
+    assert.equal(
+      autoContinueTrigger({ kind: 'error', error: { code } }, settingsOf()),
+      undefined,
+      `${code} 不该触发补发`,
+    )
+  }
+})
+
+await check('TIMEOUT 不算本机网络 —— 握手都成功了，更像远端太慢', () => {
+  assert.equal(isLocalNetworkFailure({ code: 'TIMEOUT' }), false)
+  assert.equal(isLocalNetworkFailure({ code: 'TIMEOUT', message: 'stream idle timeout after 300000ms' }), false)
+  assert.equal(
+    autoContinueTrigger({ kind: 'error', error: { code: 'TIMEOUT' } }, settingsOf()),
+    'error',
+    'TIMEOUT 应该照常补发',
+  )
+})
+
+await check('实测过的本机故障文本 → 不触发（哪怕 code 是 SERVER / UNKNOWN）', () => {
+  // 这些字符串逐字抄自 2026-10-14 的真实事件日志。
+  const real = [
+    ['SERVER', 'workbuddy: {"error":"cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed — the local resolver may be unreachable or taken over by another DNS service (VPN/MagicDNS); route egress through an upstream proxy to have the destination resolved remotely","code":"tunnel_destination_denied","detail":"unresolvable"}'],
+    ['SERVER', 'raccoon: code=tunnel_destination_denied cannot resolve tunnel destination xiaohuanxiong.com (ENOTFOUND): local name resolution failed'],
+    ['TRANSPORT', 'trae: transport error: fetch failed'],
+    ['UNKNOWN', 'CodeArts token request network error: TypeError: fetch failed'],
+    ['SERVER', '502 "cannot resolve tunnel destination api.qnaigc.com (ENOTFOUND): local name resolution failed"'],
+    ['TRANSPORT', 'qoder: transport error: fetch failed'],
+    ['SERVER', 'zcode: HTTP 502：{"error":"cannot resolve tunnel destination zcode.z.ai (ENOTFOUND)"'],
+  ]
+  for (const [code, message] of real) {
+    const failure = { code, message }
+    assert.equal(isLocalNetworkFailure(failure), true, `应判为本机网络：${message.slice(0, 60)}`)
+    assert.equal(
+      autoContinueTrigger({ kind: 'error', error: failure }, settingsOf()),
+      undefined,
+      `不该触发补发：${message.slice(0, 60)}`,
+    )
+  }
+})
+
+await check('本机证书拦截（这台机器上真实存在）→ 不触发', () => {
+  const failure = {
+    code: 'TRANSPORT',
+    message: 'fetch failed: unable to verify the first certificate; if the root CA is installed locally, try running Node.js with --use-system-ca',
+  }
+  assert.equal(isLocalNetworkFailure(failure), true)
+  assert.equal(autoContinueTrigger({ kind: 'error', error: failure }, settingsOf()), undefined)
+})
+
+await check('连接被本机拒掉 / 掐断 → 不触发', () => {
+  for (const message of [
+    'connect ECONNREFUSED 127.0.0.1:7890',
+    'socket hang up',
+    'other side closed',
+    'premature close',
+  ]) {
+    assert.equal(isLocalNetworkFailure({ code: 'TRANSPORT', message }), true, message)
+  }
+  assert.equal(isLocalNetworkFailure({ code: 'SERVER', message: 'read ECONNRESET' }), true)
+})
+
+await check('远端的问题不能被误判成本机网络（否则会漏掉该救的失败）', () => {
+  const remote = [
+    ['SERVER', 'upstream returned 502 Bad Gateway'],
+    ['RATE_LIMIT', 'rate limit exceeded, retry after 20s'],
+    ['QUOTA', 'insufficient balance'],
+    ['EMPTY_RESPONSE', 'model returned no content'],
+    ['SERVER', 'model is overloaded, please try again'],
+    ['UNKNOWN', 'the model produced an invalid tool call'],
+    ['SERVER', 'proxy returned a malformed response body'],
+    // 裸的 timeout / 超时不算 —— 握手已经成功，重发一次是有意义的。
+    ['TIMEOUT', 'request timed out after 300s'],
+    ['SERVER', 'connect ETIMEDOUT 1.2.3.4:443'],
+  ]
+  for (const [code, message] of remote) {
+    assert.equal(isLocalNetworkFailure({ code, message }), false, `不该判为本机网络：${message}`)
+    assert.equal(
+      autoContinueTrigger({ kind: 'error', error: { code, message } }, settingsOf()),
+      'error',
+      `应该照常补发：${message}`,
+    )
+  }
+})
+
+await check('形状异常时安全返回 false（不抛异常）', () => {
+  assert.equal(isLocalNetworkFailure(undefined), false)
+  assert.equal(isLocalNetworkFailure(null), false)
+  assert.equal(isLocalNetworkFailure('ECONNREFUSED'), false)
+  assert.equal(isLocalNetworkFailure({}), false)
+  assert.equal(isLocalNetworkFailure({ code: 'SERVER' }), false)
+  assert.equal(isLocalNetworkFailure({ message: 'ENOTFOUND' }), true, '没有 code 时只看 message')
+})
+
+await check('撞上限不受本机网络规则影响（它压根不是 error）', () => {
+  assert.equal(autoContinueTrigger({ kind: 'max-tokens' }, settingsOf()), 'max-tokens')
 })
 
 // ── 消息形状 ────────────────────────────────────────────────────────────────
