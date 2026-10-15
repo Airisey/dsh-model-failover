@@ -140,6 +140,11 @@ async function boot(spec) {
       resetHour: 1,
       continueText: '继续',
       retrySameModelOnce: true,
+      // 这一套验的是「接上真注册表之后行为对不对」，不是节奏。默认 5 秒会让
+      // 每个带「继续」的用例真的干等，整套从十几秒涨到一分多钟。节奏本身在
+      // autocontinue.mjs / smoke.mjs 里用注入的假 sleep 单独验；这里只留一个
+      // 用例显式设成 1 秒，证明这个设置真的能穿过真宿主落地。
+      continueDelaySec: 0,
       ...spec.settings,
     }),
   )
@@ -367,6 +372,30 @@ await check('真注册表：一个模型两次不行就换下一个，两次都�
     assert.equal(shape(alpha.calls[0].messages), 'user:写一首诗')
     assert.equal(shape(alpha.calls[1].messages), 'user:写一首诗 → user:继续')
     assert.equal(shape(beta.calls[0].messages), 'user:写一首诗 → user:继续')
+  } finally {
+    h.dispose()
+  }
+})
+
+await check('真注册表：补发「继续」之前真的会等一会儿（设置穿过真宿主生效）', async () => {
+  const alpha = new StubAdapter('alpha', () => QUOTA)
+  const beta = new StubAdapter('beta', () => OK('等完才轮到我'))
+  const h = await boot({
+    order: [
+      { provider: 'alpha', model: 'one' },
+      { provider: 'beta', model: 'one' },
+    ],
+    adapters: { alpha, beta },
+    settings: { continueDelaySec: 1 },
+  })
+  try {
+    const started = Date.now()
+    const result = await h.stream()
+    const elapsed = Date.now() - started
+    assert.equal(result.text, '等完才轮到我')
+    // 两跳带「继续」（alpha 重发 + beta 补继续），各等 1 秒；首发那一跳不等。
+    assert.ok(elapsed >= 2000, `两次「继续」各等 1 秒，实际只花了 ${elapsed}ms`)
+    assert.ok(elapsed < 10000, `不该等到天荒地老，实际 ${elapsed}ms`)
   } finally {
     h.dispose()
   }

@@ -53,6 +53,12 @@
 用满就停手等你；**你自己发下一句话**、或某一轮正常做完，计数就重新开始。
 上下文超长、没挂适配器、凭证失效这三类错误直接跳过 —— 重发一遍只会撞同一堵墙。
 
+**每次失败之后会先等一会儿再补。** 等待时长是 `continueDelaySec`（默认 5 秒，0 = 不等），
+**第一次失败也一样等**。这一等不是拖延：刚撞完限流或上游抖动的模型，隔 0.2 秒再戳一次
+只会再撞一次，除了把队列挨个隔离掉没有任何收益（实测里最难看的一段是 9 秒内落了 12 条隔离）。
+等待期间你按了停止、自己先发了一句、或者那一轮已经跑完，插件就收手不再补。
+等待同样管着适配器里「换个候选 / 同模型重发」那一跳，所以整个接力的节奏都被这一个数字管着。
+
 **本机网络没通的时候也不会补发。** 这条单独拿出来说，是因为本机网络故障在 DSH 里
 **没有专属错误码**：DNS 解析不了、代理没起来、证书被本机拦截，各家适配器会分别报成
 `SERVER`、`TRANSPORT`、`UNKNOWN`。所以插件不认错误码，而是认**报错文本**里的本机特征
@@ -115,15 +121,15 @@
 设置页里能改的都存在 `settings.json`；重置时间支持 0-23 的整点。默认值：
 `resetHour: 1`、`retrySameModelOnce: true`、`continueText: "继续"`、`retryWhenAllQuarantined: true`、
 `autoContinue: true`、`autoContinueOnFailure: true`、`autoContinueOnMaxTokens: true`、`autoContinueLimit: 3`、
-`keepEventLog: true`、`eventLogLimit: 200`。
+`continueDelaySec: 5`、`keepEventLog: true`、`eventLogLimit: 200`。
 
 ## 开发
 
 ```
-node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线（25 项）
-node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求（25 项）
-node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（10 项）
-node test/autocontinue.mjs # 自动「继续」的判定与节流、本机网络判据（35 项）
+node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线、补发节奏（28 项）
+node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求（26 项）
+node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（11 项）
+node test/autocontinue.mjs # 自动「继续」的判定、节流与等待、本机网络判据（43 项）
 ```
 
 `test/client.mjs` 里有一个几十行的 React 替身，它把 `client.js` 当真实 bundle 加载

@@ -300,6 +300,7 @@ const initialState = () => ({
     autoContinueOnFailure: true,
     autoContinueOnMaxTokens: true,
     autoContinueLimit: 3,
+    continueDelaySec: 5,
     keepEventLog: true,
     eventLogLimit: 200,
   },
@@ -520,7 +521,7 @@ globalThis.fetch = async (url, init = {}) => {
           ? { provider: item.provider, model: item.model }
           : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort }))
       }
-      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueLimit']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueLimit', 'continueDelaySec']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -692,7 +693,7 @@ await check('乱敲的重置时间被丢弃，不会发 POST', async () => {
   assert.equal(hourInput().props.value, '23', '输入框应回滚到宿主的值')
 })
 
-await check('自动「继续」：三个开关 + 次数上限都在，且反映宿主设置', () => {
+await check('自动「继续」：三个开关 + 次数上限 + 等待秒数都在，且反映宿主设置', () => {
   const toggle = (label) => runtime.find((node) => node.props['aria-label'] === label)
   for (const label of ['optAutoContinue', 'optAutoOnFailure', 'optAutoOnMaxTokens']) {
     assert.equal(toggle(label).props['aria-pressed'], 'true', `${label} 应反映当前设置`)
@@ -702,9 +703,15 @@ await check('自动「继续」：三个开关 + 次数上限都在，且反映�
     (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
   )
   assert.equal(limit.props.value, '3', '次数上限应显示宿主的值')
+
+  const delay = runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 0 && node.props.max === 300,
+  )
+  assert.equal(delay.props.value, '5', '等待秒数应显示宿主的值')
+  assert.equal(delay.props.disabled, false)
 })
 
-await check('自动「继续」总开关关掉后，两个分项和次数上限一起置灰', async () => {
+await check('自动「继续」总开关关掉后，两个分项、次数上限和等待秒数一起置灰', async () => {
   const before = requests.length
   await runtime.find((node) => node.props['aria-label'] === 'optAutoContinue').props.onClick()
   await runtime.mount(page(props))
@@ -720,6 +727,10 @@ await check('自动「继续」总开关关掉后，两个分项和次数上限�
     (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
   )
   assert.equal(limit.props.disabled, true)
+  const delay = runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 0 && node.props.max === 300,
+  )
+  assert.equal(delay.props.disabled, true, '总开关关了，等待秒数也没意义')
 
   // 恢复，免得影响后面的用例。
   await toggle('optAutoContinue').props.onClick()
@@ -754,6 +765,39 @@ await check('次数上限失焦后 POST autoContinueLimit，超范围夹到 1-20
   assert.equal(posts.length, 1)
   assert.deepEqual(posts[0].body, { autoContinueLimit: 20 })
   assert.equal(current.settings.autoContinueLimit, 20)
+})
+
+await check('等待秒数失焦后 POST continueDelaySec，超范围夹到 0-300', async () => {
+  const delayInput = () => runtime.find(
+    (node) => node.tag === 'input' && node.props.min === 0 && node.props.max === 300,
+  )
+  const before = requests.length
+  delayInput().props.onChange({ target: { value: '999' } })
+  await runtime.mount(page(props))
+  assert.equal(delayInput().props.value, '999', '输入框应保留用户敲进去的草稿')
+  delayInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { continueDelaySec: 300 })
+  assert.equal(current.settings.continueDelaySec, 300)
+
+  // 0 是「不等待」，必须能存进去 —— 夹取的下界不能把它弹回默认值。
+  const beforeZero = requests.length
+  delayInput().props.onChange({ target: { value: '0' } })
+  await runtime.mount(page(props))
+  delayInput().props.onBlur()
+  await runtime.mount(page(props))
+  const zeroPosts = requests.slice(beforeZero).filter((row) => row.method === 'POST')
+  assert.equal(zeroPosts.length, 1)
+  assert.deepEqual(zeroPosts[0].body, { continueDelaySec: 0 })
+
+  // 恢复，免得影响后面的用例。
+  delayInput().props.onChange({ target: { value: '5' } })
+  await runtime.mount(page(props))
+  delayInput().props.onBlur()
+  await runtime.mount(page(props))
 })
 
 await check('自动补发事件在日志里有自己的文案，不会漏出裸 kind', async () => {

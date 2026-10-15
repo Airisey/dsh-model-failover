@@ -53,8 +53,9 @@ const settingsOf = (overrides = {}) => ({ ...DEFAULT_SETTINGS, ...overrides })
  * @param {boolean} [options.hasPending] - 收件箱里是否已经有用户消息。
  * @param {() => number} [options.now] - 覆盖时钟。
  * @param {number} [options.pendingTtlMs] - 覆盖标记有效期。
+ * @param {(ms: number) => Promise<void>} [options.sleep] - 覆盖等待实现。
  */
-function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = false, now, pendingTtlMs } = {}) {
+function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = false, now, pendingTtlMs, sleep } = {}) {
   const session = { id: 's1' }
   const sent = []
   const agent = {
@@ -69,17 +70,20 @@ function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = fa
   }
   const events = []
   const warnings = []
+  // 真的等 5 秒会让整套测试慢得没法跑；记下每次等待的时长，立刻返回。
+  const waits = []
   const auto = new AutoContinue({
     agents,
     settings: { get: () => settings },
     log: { info: () => {}, warn: (m) => warnings.push(m), push: (e) => events.push(e) },
     ...(now === undefined ? {} : { now }),
     ...(pendingTtlMs === undefined ? {} : { pendingTtlMs }),
+    sleep: sleep ?? (async (ms) => { waits.push(ms) }),
   })
   const end = (reason, turn = 1) => ({ type: 'turn/end', data: { turn, reason } })
   /** 驱动开始跑一轮 —— 我们的 followup 和用户手敲的消息都会产生它。 */
   const start = (turn = 1) => ({ type: 'turn/start', data: { turn } })
-  return { session, agent, agents, sent, events, warnings, auto, end, start, settings }
+  return { session, agent, agents, sent, events, warnings, auto, end, start, settings, waits }
 }
 
 // ── 触发判定（纯函数） ──────────────────────────────────────────────────────
@@ -314,6 +318,105 @@ await check('continueText 是空白 → 退回默认「继续」', async () => {
   assert.equal(h.sent[0].content[0].text, '继续')
 })
 
+// ── 补发节奏 ────────────────────────────────────────────────────────────────
+
+process.stdout.write('autocontinue: 补发之前先等一等\n')
+
+/**
+ * 一个能卡住的假 sleep：记录时长，直到 `release()` 被调用才返回。
+ *
+ * 用真的定时器没法在「睡到一半」插进一条用户消息，而这段逻辑的全部价值
+ * 恰恰在于睡醒之后发现情况变了。
+ */
+function gateSleep() {
+  const waits = []
+  let release = null
+  const sleep = (ms) => new Promise((resolve) => { waits.push(ms); release = resolve })
+  return { sleep, waits, release: () => release?.() }
+}
+
+await check('第一次失败也一样等：等完才把「继续」发出去', async () => {
+  const gate = gateSleep()
+  const h = makeHarness({ sleep: gate.sleep })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+  assert.deepEqual(gate.waits, [5000], '默认等 5 秒')
+  assert.equal(h.sent.length, 0, '还在等，不该已经发出去')
+
+  gate.release()
+  await settle()
+  assert.equal(h.sent.length, 1, '等完之后照常补发')
+})
+
+await check('撞 token 上限同样要等', async () => {
+  const gate = gateSleep()
+  const h = makeHarness({ sleep: gate.sleep })
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }))
+  await settle()
+  assert.deepEqual(gate.waits, [5000])
+  gate.release()
+  await settle()
+  assert.equal(h.sent.length, 1)
+})
+
+await check('等待时长跟着设置走；设成 0 就不等', async () => {
+  const gate = gateSleep()
+  const slow = makeHarness({ settings: settingsOf({ continueDelaySec: 30 }), sleep: gate.sleep })
+  slow.auto.observe(slow.session, slow.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+  assert.deepEqual(gate.waits, [30000])
+  gate.release()
+
+  const fast = makeHarness({ settings: settingsOf({ continueDelaySec: 0 }) })
+  fast.auto.observe(fast.session, fast.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+  assert.deepEqual(fast.waits, [], '设成 0 时一次都不该等')
+  assert.equal(fast.sent.length, 1, '不等也要照常补发')
+})
+
+await check('等待期间用户自己发了一句 → 收手，不再补「继续」', async () => {
+  const gate = gateSleep()
+  const h = makeHarness({ sleep: gate.sleep })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+  assert.deepEqual(gate.waits, [5000])
+
+  // 用户不等我们，自己敲了一句 —— 这一轮由他发起。
+  h.auto.observe(h.session, h.start(2))
+  gate.release()
+  await settle()
+  assert.equal(h.sent.length, 0, '用户已经接手，再补一句就是往对话里灌噪音')
+})
+
+await check('等待期间那一轮已经跑完了 → 收手（此时 status 又回到 idle，光看它判不出来）', async () => {
+  const gate = gateSleep()
+  const h = makeHarness({ sleep: gate.sleep })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+
+  // 会话自己接着跑完了一轮：状态回到 idle、收件箱也空了，只有世代能发现。
+  h.auto.observe(h.session, h.end({ kind: 'completed' }, 2))
+  assert.equal(h.agent.status, 'idle')
+  gate.release()
+  await settle()
+  assert.equal(h.sent.length, 0)
+})
+
+await check('等待期间插件被卸载 → 收手', async () => {
+  const gate = gateSleep()
+  const h = makeHarness({ sleep: gate.sleep })
+  const listeners = new Map()
+  const off = h.auto.attach({ on: (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name) } })
+  listeners.get('session/event')(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'boom' } }))
+  await settle()
+  assert.deepEqual(gate.waits, [5000])
+
+  off()
+  gate.release()
+  await settle()
+  assert.equal(h.sent.length, 0, '卸载之后不该再往会话里塞消息')
+})
+
 // ── 节流 ────────────────────────────────────────────────────────────────────
 
 process.stdout.write('autocontinue: 节流与计数\n')
@@ -455,13 +558,15 @@ await check('没有 id 的事件主体直接忽略', async () => {
 
 process.stdout.write('autocontinue: 设置归一\n')
 
-await check('默认值：开、两种触发都开、上限 3', () => {
+await check('默认值：开、两种触发都开、上限 3、失败后先等 5 秒', () => {
   const s = normalizeSettings({})
   assert.equal(s.autoContinue, true)
   assert.equal(s.autoContinueOnFailure, true)
   assert.equal(s.autoContinueOnMaxTokens, true)
   assert.equal(s.autoContinueLimit, DEFAULT_SETTINGS.autoContinueLimit)
   assert.equal(s.autoContinueLimit, 3)
+  assert.equal(s.continueDelaySec, DEFAULT_SETTINGS.continueDelaySec)
+  assert.equal(s.continueDelaySec, 5)
 })
 
 await check('关掉用 false 表达；"false" 这种字符串也算关（与既有开关同一套口径）', () => {
@@ -484,6 +589,23 @@ await check('上限值能被往返序列化（走一遍 JSON 仍相等）', () =
   const back = normalizeSettings(JSON.parse(JSON.stringify(s)))
   assert.equal(back.autoContinueLimit, 5)
   assert.equal(back.autoContinue, false)
+})
+
+await check('等待秒数：0 合法（= 不等），负数 / 小数 / 字符串回默认，超上限夹到 300', () => {
+  assert.equal(normalizeSettings({ continueDelaySec: 12 }).continueDelaySec, 12)
+  assert.equal(normalizeSettings({ continueDelaySec: 0 }).continueDelaySec, 0, '0 是「不等待」，必须存得进去')
+  assert.equal(normalizeSettings({ continueDelaySec: -1 }).continueDelaySec, 5, '负数非法 → 回默认')
+  assert.equal(normalizeSettings({ continueDelaySec: 2.5 }).continueDelaySec, 5, '小数不认')
+  assert.equal(normalizeSettings({ continueDelaySec: '5' }).continueDelaySec, 5, '字符串不认')
+  assert.equal(normalizeSettings({ continueDelaySec: 999 }).continueDelaySec, 300, '夹到硬上限')
+  assert.equal(normalizeSettings({ continueDelaySec: null }).continueDelaySec, 5)
+})
+
+await check('等待秒数能被往返序列化，且 0 不会在往返里变回默认值', () => {
+  const s = normalizeSettings({ continueDelaySec: 0 })
+  const back = normalizeSettings(JSON.parse(JSON.stringify(s)))
+  assert.equal(back.continueDelaySec, 0)
+  assert.equal(normalizeSettings({ continueDelaySec: 30 }).continueDelaySec, 30)
 })
 
 // ── 收尾 ────────────────────────────────────────────────────────────────────

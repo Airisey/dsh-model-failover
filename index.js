@@ -61,6 +61,9 @@ const EVENT_LOG_HARD_LIMIT = 2000
 /** 「自动继续」连续补发次数的硬上限：再大就只是把同一堵墙撞更多次。 */
 const AUTO_CONTINUE_HARD_LIMIT = 20
 
+/** 「继续」前的等待秒数上限：再多就不如让用户自己决定什么时候重试了。 */
+const CONTINUE_DELAY_HARD_LIMIT = 300
+
 /**
  * 把任意 JSON 收敛成设置形状。任何一项缺失或类型不对都回落到默认值。
  *
@@ -109,6 +112,12 @@ export function normalizeSettings(raw) {
       ? Math.min(source.autoContinueLimit, AUTO_CONTINUE_HARD_LIMIT)
       : DEFAULT_SETTINGS.autoContinueLimit
 
+  // 允许 0（= 不等待，回到旧行为），所以判据是 `>= 0` 而不是 `> 0`。
+  const continueDelaySec =
+    Number.isInteger(source.continueDelaySec) && source.continueDelaySec >= 0
+      ? Math.min(source.continueDelaySec, CONTINUE_DELAY_HARD_LIMIT)
+      : DEFAULT_SETTINGS.continueDelaySec
+
   return {
     enabled: source.enabled !== false,
     bootstrapped: source.bootstrapped === true,
@@ -125,6 +134,7 @@ export function normalizeSettings(raw) {
     autoContinueOnFailure: source.autoContinueOnFailure !== false,
     autoContinueOnMaxTokens: source.autoContinueOnMaxTokens !== false,
     autoContinueLimit,
+    continueDelaySec,
     keepEventLog: source.keepEventLog !== false,
     eventLogLimit,
   }
@@ -320,6 +330,7 @@ export function apply(ctx, _config) {
     if ('autoContinueOnFailure' in patch) next.autoContinueOnFailure = patch.autoContinueOnFailure !== false
     if ('autoContinueOnMaxTokens' in patch) next.autoContinueOnMaxTokens = patch.autoContinueOnMaxTokens !== false
     if ('autoContinueLimit' in patch) next.autoContinueLimit = patch.autoContinueLimit
+    if ('continueDelaySec' in patch) next.continueDelaySec = patch.continueDelaySec
     if ('keepEventLog' in patch) next.keepEventLog = patch.keepEventLog !== false
     if ('eventLogLimit' in patch) next.eventLogLimit = patch.eventLogLimit
     // replace 会过一遍 normalizeSettings，所以非法值在这里被就地修好，

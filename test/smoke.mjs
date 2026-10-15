@@ -14,7 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -177,6 +177,8 @@ async function harness({ order, scripts, settings: overrides = {}, at = new Date
   await catalog.fillModelFacts()
 
   const events = []
+  // 真的等 5 秒会让整套测试慢得没法跑；记下每次等待的时长，立刻返回。
+  const waits = []
   const adapter = new FailoverAdapter({
     llm,
     settings,
@@ -184,9 +186,10 @@ async function harness({ order, scripts, settings: overrides = {}, at = new Date
     catalog,
     log: { warn: () => {}, push: (event) => events.push(event) },
     now: () => clock.ms,
+    sleep: async (ms) => { waits.push(ms) },
   })
 
-  return { llm, clock, settings, health, catalog, adapter, events }
+  return { llm, clock, settings, health, catalog, adapter, events, waits }
 }
 
 /** 收集整条流。 */
@@ -508,7 +511,47 @@ await check('关掉重发：每换个模型只试一次', async () => {
   assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('beta', 'one')])
 })
 
-// 9 · 总开关
+// 9 · 补发节奏：每次失败之后先等一等
+await check('补发节奏：每次「继续」之前都先等一等，首次请求不等', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('好')]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  assert.equal(textOf(chunks), '好')
+  // 两次调用之间的三次尝试（alpha 首发、alpha 重发、beta 补继续）里，
+  // 只有后两次带「继续」，所以只该等两回。
+  assert.deepEqual(h.waits, [5000, 5000], '每个带「继续」的跳都该等一次')
+})
+
+await check('补发节奏：0 秒 = 不等待，回到旧行为', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    settings: { continueDelaySec: 0 },
+    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('好')]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  assert.equal(textOf(chunks), '好')
+  assert.deepEqual(h.waits, [], '设成 0 时一次都不该等')
+})
+
+await check('补发节奏：等待期间用户按了停止，不再打注定被取消的请求', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    settings: { continueDelaySec: 5 },
+    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('不该出现')]]),
+  })
+  const controller = new AbortController()
+  // 一睡下去就按停止 —— 醒来后必须立刻收手。
+  const realSleep = h.adapter.sleep
+  h.adapter.sleep = async (ms, signal) => { await realSleep(ms, signal); controller.abort() }
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], signal: controller.signal }))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '中止后不该再碰下一个模型')
+  assert.equal(finishOf(chunks)?.reason?.failure?.code, 'QUOTA', '交出的仍是上一个候选的真实结局')
+  assert.equal(textOf(chunks), '', '不该出现下一个模型的文字')
+})
+
+// 10 · 总开关
 await check('关掉接力：退化为只使用第一个模型', async () => {
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
@@ -828,6 +871,12 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = freshHome
   try {
+    // 「补发前先等几秒」在这里关掉：这一条验的是接线，不是节奏，真等 5 秒
+    // 只会让断言跑在一次还没醒来的等待前面。节奏本身在 autocontinue.mjs
+    // 用注入的假 sleep 单独验。
+    mkdirSync(join(freshHome, 'dsh-model-failover'), { recursive: true })
+    writeFileSync(join(freshHome, 'dsh-model-failover', 'settings.json'), JSON.stringify({ continueDelaySec: 0 }))
+
     const llm = createLlm(new Map())
     llm.register('alpha', [{ id: 'one', name: 'Alpha One' }])
     llm.registerAdapter = () => () => {}
