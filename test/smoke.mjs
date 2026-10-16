@@ -1201,6 +1201,9 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
     // 显示用的标签一起交出去。
     await call('POST', '/api/dsh-model-failover/settings', { autoContinue: true, autoContinueOnMaxTokens: true })
     assert.equal(typeof registered?.adapter?.stream, 'function', 'index.js 应把适配器挂到注册表上')
+    // 真实的先后是 turn/start → 适配器跑 → turn/end，监听器靠这个顺序判断
+    // 「这一轮到底是不是接力跑的」，所以这里也必须按真实顺序来。
+    fire('turn/start', { turn: 21 })
     await drain(registered.adapter.stream({
       provider: 'model-failover',
       model: 'auto',
@@ -1208,7 +1211,6 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
       sessionId: 's1',
     }))
 
-    fire('turn/start', { turn: 21 })
     fire('turn/end', { turn: 21, reason: { kind: 'max-tokens' } })
     await settle()
     assert.equal(sent.length, 5, '第 21 轮撞上限仍应补发（上面刚把开关打开）')

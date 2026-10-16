@@ -593,22 +593,50 @@ await check('补发出来的那一轮，记的是「接手的是谁」', async (
   assert.equal(noteOf(rows, 1), '2:auto:beta/two')
 })
 
-await check('接力没插手的轮不留痕', () => {
+await check('上一轮跑过接力，这一轮你手动挑了别的模型：不许指错人', () => {
   const notes = new TurnNotes()
   const h = makeHarness({ notes })
   notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 1))
+  assert.equal(notes.forSession('s1').length, 1, '第一轮补发，记了一条')
+
+  // 第二轮用户自己挑了个具体模型：适配器不会再 remember，便签得原地不动。
   h.auto.observe(h.session, h.start(5))
   h.auto.observe(h.session, h.end({ kind: 'completed' }, 5))
+  const rows = notes.forSession('s1')
+  assert.equal(rows.length, 1, '不能拿上一轮的结论去标这一轮')
+  assert.equal(noteOf(rows, 0), '1:max-tokens:alpha/one')
+})
+
+await check('接力没跑过的轮不写小字（这一轮压根没走适配器）', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  h.auto.observe(h.session, h.start(6))
+  h.auto.observe(h.session, h.end({ kind: 'completed' }, 6))
   assert.deepEqual(notes.forSession('s1'), [])
 })
 
-await check('本机网络故障跳过补发时，用户自己那一轮同样不留痕', () => {
+await check('用接力跑完、一切正常的一轮也写小字', () => {
   const notes = new TurnNotes()
   const h = makeHarness({ notes })
-  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
-  h.auto.observe(h.session, h.start(6))
-  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } }, 6))
-  assert.deepEqual(notes.forSession('s1'), [])
+  h.auto.observe(h.session, h.start(7))
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 7 })
+  h.auto.observe(h.session, h.end({ kind: 'completed' }, 7))
+  const rows = notes.forSession('s1')
+  assert.equal(rows.length, 1)
+  assert.equal(noteOf(rows, 0), '7:relay:alpha/one')
+})
+
+await check('本机网络故障没补发，小字照写（用户得知道刚才是谁在跑）', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  h.auto.observe(h.session, h.start(8))
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 8 })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } }, 8))
+  assert.equal(h.sent.length, 0, '本机网络问题不该补发')
+  const rows = notes.forSession('s1')
+  assert.equal(rows.length, 1)
+  assert.equal(noteOf(rows, 0), '8:relay:alpha/one')
 })
 
 await check('便签按会话分开', () => {
