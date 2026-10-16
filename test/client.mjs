@@ -277,6 +277,13 @@ const REACT = {
 const KEY = (provider, model) => `${provider}\u0000${model}`
 const at = Date.now()
 
+/**
+ * 一条长报错：前半段是线上真实出现过的那种 DNS 隧道失败，末尾那个标记故意放在
+ * 160 字符之后 —— 摘要行截断到 160，展开时才该看到它。
+ */
+const TAIL_MARK = '『尾部标记·只有展开才看得见』'
+const LONG_ERROR = `workbuddy: {"error":"cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed — the local resolver may be unreachable or taken over by another DNS service (VPN/MagicDNS); route egress through an upstream proxy to have the destination resolved remotely","code":"tunnel_destination_denied","detail":"unresolvable"} ${TAIL_MARK}`
+
 const initialState = () => ({
   ok: true,
   route: { provider: 'model-failover', model: 'auto', label: '模型接力' },
@@ -321,7 +328,9 @@ const initialState = () => ({
   catalogErrors: [],
   catalogScannedAt: at,
   quarantined: [
-    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at: at - 60_000, label: 'Code99 · Beta One' },
+    // 宿主 view() 按判定时间升序排，这里也照这个顺序摆。
+    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at: at - 90_000, label: 'Code99 · Beta One' },
+    { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'TRANSPORT', message: LONG_ERROR, at: at - 60_000, label: 'FutureHub · Gamma Two' },
   ],
   good: [{ key: KEY('alpha', 'one'), at, provider: 'alpha', model: 'one', label: '硅基流动 · Alpha One' }],
   events: [
@@ -663,6 +672,85 @@ await check('今天隔离的模型带红色徽标，昨天验证可用的带绿�
     badges.some((node) => String(node.props.title ?? '').includes('QUOTA')),
     '隔离徽标应带着错误码，方便一眼看出是额度问题还是别的问题',
   )
+})
+
+// ── 隔离名单：展开看完整报错 ────────────────────────────────────────────────
+
+/** 隔离名单里那几行的展开按钮（名单之外的按钮不带 aria-expanded）。 */
+const expanders = (rt = runtime) => rt.nodes.filter(
+  (node) => node.tag === 'button' && node.props['aria-expanded'] !== undefined,
+)
+
+await check('隔离名单每行都有一个展开箭头，默认是收起的', () => {
+  const buttons = expanders()
+  assert.equal(buttons.length, 2, '隔离了几个模型就有几个箭头')
+  assert.ok(buttons.every((node) => node.props['aria-expanded'] === 'false'), '默认都收起')
+  assert.equal(buttons[0].text, '▸')
+  assert.equal(buttons[0].props.title, 'expand', '收起时提示「展开」')
+  assert.equal(runtime.nodes.filter((node) => node.props.className === 'mf-detail').length, 0, '收起时不该有详情块')
+})
+
+await check('摘要行只给截断后的报错，尾部标记先藏着', () => {
+  const subs = runtime.nodes.filter((node) => node.props.className === 'mf-sub' && String(node.text).includes('tunnel'))
+  assert.equal(subs.length, 1, '两条隔离里只有 gamma 那条带着长报错')
+  assert.ok(subs[0].text.includes('cannot resolve tunnel destination'), '摘要里应保留报错开头')
+  assert.ok(!subs[0].text.includes(TAIL_MARK), '摘要行该把 160 字符之后的内容截掉')
+  const flat = runtime.text(tree)
+  assert.ok(!flat.includes(TAIL_MARK), '收起状态下整棵树里都不该出现尾部标记')
+})
+
+await check('点开箭头：摊出错误码、路由、尝试次数、判定时间和完整报错原文', async () => {
+  await expanders()[1].props.onClick()
+  await runtime.mount(page(props))
+
+  const buttons = expanders()
+  assert.equal(buttons[1].props['aria-expanded'], 'true', '点过的那一行变成展开')
+  assert.equal(buttons[1].text, '▾')
+  assert.equal(buttons[1].props.title, 'collapse', '展开后提示变成「收起」')
+  assert.equal(buttons[0].props['aria-expanded'], 'false', '别的行不受影响 —— 展开状态是按行各记一份')
+
+  const details = runtime.nodes.filter((node) => node.props.className === 'mf-detail')
+  assert.equal(details.length, 1, '只摊开了一行')
+  const rows = Object.fromEntries(
+    runtime.nodes
+      .filter((node) => node.props.className === 'mf-detail-row')
+      .map((node) => [node.props.key, node.text]),
+  )
+  assert.equal(rows.detailCode, 'detailCode网络中断  TRANSPORT', '错误码既给人话也留原始值')
+  assert.equal(rows.detailRoute, 'detailRoutegamma / two')
+  assert.equal(rows.detailAttempts, 'detailAttempts1')
+  assert.match(rows.detailAt, /^detailAt\d\d-\d\d \d\d:\d\d$/, '判定时间跟一个 MM-DD HH:MM 时间戳')
+  assert.ok(rows.detailMessage.includes(TAIL_MARK), '展开就是为了看被截掉的那半句')
+  assert.ok(rows.detailMessage.startsWith('detailMessage'), '带一行「报错原文」的标签')
+})
+
+await check('再点一下箭头就收回去，详情块整个消失', async () => {
+  await expanders()[1].props.onClick()
+  await runtime.mount(page(props))
+  assert.equal(expanders()[1].props['aria-expanded'], 'false')
+  assert.equal(runtime.nodes.filter((node) => node.props.className === 'mf-detail').length, 0)
+  assert.ok(!runtime.text(tree).includes(TAIL_MARK), '收回去之后尾部标记也一起藏好')
+})
+
+await check('宿主没留下报错文本时，展开显示的是「没有留下」而不是空白', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const blank = initialState()
+  blank.quarantined = [
+    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'UNKNOWN', message: '', at, label: 'Code99 · Beta One' },
+  ]
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(blank) })
+  try {
+    const page2 = sections[0].component
+    await fresh.mount(page2(props))
+    await expanders(fresh)[0].props.onClick()
+    await fresh.mount(page2(props))
+    const rows = fresh.nodes.filter((node) => node.props.className === 'mf-detail-row')
+    assert.ok(rows.some((node) => node.text === 'detailMessagedetailNoMessage'), '空报错要有一句说明')
+    assert.equal(expanders(fresh)[0].props['aria-expanded'], 'true')
+  } finally {
+    globalThis.fetch = saved
+  }
 })
 
 await check('每行按模型自己的档位表画思考强度下拉框：认档位 / 不支持 / 还没问到', () => {

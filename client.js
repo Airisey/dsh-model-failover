@@ -82,6 +82,13 @@ window.__ModuleLoader__.load({
 .mf-event-time { flex: none; opacity: .5; font-variant-numeric: tabular-nums; }
 .mf-empty { opacity: .55; font-size: 12px; padding: 4px 0; }
 .mf-tail { font-size: 11.5px; line-height: 1.5; opacity: .55; padding: 2px 0 0; user-select: none; }
+/* 隔离名单的一行：主行 +（展开时）下面的报错详情。单开一层是为了不动 .mf-row 的
+   单行布局 —— 里面塞不下会换行的正文。 */
+.mf-qrow { display: flex; flex-direction: column; }
+.mf-detail { display: flex; flex-direction: column; gap: 3px; margin: 0 8px 6px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, currentColor 5%, transparent); font-size: 11.5px; }
+.mf-detail-row { display: flex; gap: 8px; align-items: baseline; }
+.mf-detail-label { flex: none; opacity: .55; }
+.mf-detail-text { min-width: 0; white-space: pre-wrap; word-break: break-word; }
 `
 
     // ── 文案 ────────────────────────────────────────────────────────────────
@@ -114,9 +121,17 @@ window.__ModuleLoader__.load({
         add: '添加',
         noModels: '没有扫到可用的模型。',
         quarantined: '今日隔离名单',
-        quarantinedHint: '这些模型今天不再被用来起头；解除后立即可用。',
+        quarantinedHint: '这些模型今天不再被用来起头；解除后立即可用。点左边的箭头看完整报错。',
         clearQuarantine: '解除今日隔离',
         attempts: '尝试次数',
+        expand: '展开报错详情',
+        collapse: '收起报错详情',
+        detailCode: '错误码',
+        detailRoute: '路由',
+        detailAttempts: '尝试次数',
+        detailAt: '判定时间',
+        detailMessage: '报错原文',
+        detailNoMessage: '宿主没有留下报错文本。',
         relay: '接力规则',
         relayHint:
           '一个模型产不出东西之后怎么办：先让它自己接着写、还是直接换人，以及整条队列都没人可用时怎么收场。',
@@ -199,9 +214,17 @@ window.__ModuleLoader__.load({
         add: 'Add',
         noModels: 'No models were discovered.',
         quarantined: 'Quarantined today',
-        quarantinedHint: 'These models will not start a task today. Clearing makes them usable immediately.',
+        quarantinedHint: 'These models will not start a task today. Clearing makes them usable immediately. Use the arrow at left to see the full error.',
         clearQuarantine: 'Clear today’s quarantine',
         attempts: 'attempts',
+        expand: 'Show the full error',
+        collapse: 'Hide the error',
+        detailCode: 'Code',
+        detailRoute: 'Route',
+        detailAttempts: 'Attempts',
+        detailAt: 'Recorded',
+        detailMessage: 'Raw error',
+        detailNoMessage: 'The host recorded no error text.',
         relay: 'Relay rules',
         relayHint:
           'What happens after a model produces nothing: let it keep writing, hand over to the next one, and how to end when the whole queue is unusable.',
@@ -383,6 +406,60 @@ window.__ModuleLoader__.load({
           hint ? div({ className: 'mf-note' }, hint) : null,
         ),
         h(Switch, { checked, onChange, disabled, label }),
+      )
+    }
+
+    /**
+     * 隔离名单里的一行：默认只给一行摘要，点箭头才摊开完整报错。
+     *
+     * 摘要那行故意把正文截到 160 字符 —— 一行放不下，且多数报错的关键词就在开头。
+     * 摊开时给的是宿主存下来的**原文**（`health.js` 落盘时截到 400 字符），不再
+     * 二次截断：点开就是为了看被截掉的那半句，再截一次等于没点。
+     *
+     * 展开状态放在行自己身上，所以「哪几行摊开着」是每个渲染器各自的事，宿主和
+     * 设置页都不需要记住它。
+     */
+    function QuarantineRow({ row, t, now }) {
+      const [open, setOpen] = useState(false)
+      const at = row.at ?? now
+      const message = String(row.message ?? '')
+      const detail = [
+        { key: 'detailCode', value: [codeText(row.code), row.code].filter((part) => part !== '').join('  ') },
+        { key: 'detailRoute', value: `${row.provider ?? '?'} / ${row.model ?? '?'}` },
+        { key: 'detailAttempts', value: String(row.attempts ?? 1) },
+        { key: 'detailAt', value: stamp(at) },
+      ].filter((item) => item.value !== '')
+      return div({ className: 'mf-qrow' },
+        div({ className: 'mf-row' },
+          h('button', {
+            type: 'button',
+            className: 'mf-btn mf-icon',
+            'aria-expanded': open ? 'true' : 'false',
+            title: t(open ? 'collapse' : 'expand'),
+            onClick: () => setOpen((value) => !value),
+          }, open ? '▾' : '▸'),
+          div({ className: 'mf-main' },
+            div({ className: 'mf-name' }, row.label ?? `${row.provider} / ${row.model}`),
+            div({ className: 'mf-sub' },
+              [codeText(row.code), row.code, message.slice(0, 160), `${row.attempts ?? 1} ${t('attempts')}`]
+                .filter((part) => part !== '' && part !== undefined)
+                .join(' · '),
+            ),
+          ),
+          span({ className: 'mf-badge mf-bad' }, stamp(at)),
+        ),
+        open
+          ? div({ className: 'mf-detail' },
+              ...detail.map((item) => div({ className: 'mf-detail-row', key: item.key },
+                span({ className: 'mf-detail-label' }, t(item.key)),
+                span({ className: 'mf-detail-text' }, item.value),
+              )),
+              div({ className: 'mf-detail-row', key: 'detailMessage' },
+                span({ className: 'mf-detail-label' }, t('detailMessage')),
+                span({ className: 'mf-detail-text' }, message === '' ? t('detailNoMessage') : message),
+              ),
+            )
+          : null,
       )
     }
 
@@ -693,17 +770,12 @@ window.__ModuleLoader__.load({
         quarantined.size > 0
           ? Card({ title: `${t('quarantined')} (${quarantined.size})` },
               div({ className: 'mf-note' }, t('quarantinedHint')),
-              ...[...quarantined.values()].map((row) => div({ className: 'mf-row', key: row.key },
-                div({ className: 'mf-main' },
-                  div({ className: 'mf-name' }, row.label ?? `${row.provider} / ${row.model}`),
-                  div({ className: 'mf-sub' },
-                    [codeText(row.code), row.code, String(row.message ?? '').slice(0, 160), `${row.attempts ?? 1} ${t('attempts')}`]
-                      .filter((part) => part !== '' && part !== undefined)
-                      .join(' · '),
-                  ),
-                ),
-                span({ className: 'mf-badge mf-bad' }, stamp(row.at ?? now)),
-              )),
+              ...[...quarantined.values()].map((row) => h(QuarantineRow, {
+                key: row.key,
+                row,
+                t,
+                now,
+              })),
             )
           : null,
 
