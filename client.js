@@ -150,6 +150,7 @@ window.__ModuleLoader__.load({
         trigMaxTokens: '输出撞到上限',
         trigError: '运行失败',
         evAutoContinueSkipped: '本轮是本机网络问题（{code}），没有补发「继续」',
+        evCeilingRotate: '「{provider} · {model}」连着 {count} 次撞到输出上限，接着写的换成「{to}」',
         count: '条',
         events: '事件日志',
         clearLog: '清空日志',
@@ -234,6 +235,7 @@ window.__ModuleLoader__.load({
         trigMaxTokens: 'hit the token ceiling',
         trigError: 'failed',
         evAutoContinueSkipped: 'Local network problem ({code}) — no “continue” was sent',
+        evCeilingRotate: '“{provider} · {model}” hit the output ceiling {count} times in a row — “{to}” takes over',
         count: 'entries',
         events: 'Event log',
         clearLog: 'Clear log',
@@ -541,6 +543,14 @@ window.__ModuleLoader__.load({
             break
           case 'auto-continue-skipped':
             body = t('evAutoContinueSkipped', { code: event.code ?? '?' })
+            break
+          case 'ceiling-rotate':
+            body = t('evCeilingRotate', {
+              provider: event.provider,
+              model: event.model,
+              count: event.count ?? 0,
+              to: event.to ?? '?',
+            })
             break
           default:
             body = `${event.kind ?? '?'}`

@@ -489,6 +489,168 @@ await check('撞输出上限之后，下一个任务仍然从原来那个模型�
   assert.equal(finishOf(second)?.reason?.kind, 'max-tokens')
 })
 
+// 5b · 同一个模型**连着**撞上限 → 换队列里的下一个
+//
+// 用户报的现象：「输出撞到上限时，一直重复试验一个模型，不切换下一个模型」。
+// 撞上限本身不是「模型坏了」，所以第一次照旧让它接着写；连着撞就说明它在这个
+// 任务上写不完，该换人了。
+const ceilingOpts = (sessionId) => ({ provider: ROUTE, model: 'auto', messages: [user('写一篇长的')], sessionId })
+
+await check('第一次撞上限仍然用原模型，连着撞到第二次才换人', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('换我接着写')],
+    ]),
+  })
+  const opts = ceilingOpts('s-rotate')
+
+  // 第 1 轮：撞上限。这是「第一次」，不许换人。
+  await drain(h.adapter.stream(opts))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '第一次撞上限不是换人的理由')
+
+  // 第 2 轮（自动补发的「继续」）：还是 alpha，又撞 —— 账记到 2。
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream(opts))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '第一句「继续」仍归原模型')
+
+  // 第 3 轮：连着撞够两次，轮到 beta 接手。
+  h.llm.calls.length = 0
+  const third = await drain(h.adapter.stream(opts))
+  assert.equal(commands(h.llm)[0], routeKey('beta', 'one'), '连着撞到第二次之后该换人了')
+  assert.equal(textOf(third), '换我接着写')
+  assert.equal(finishOf(third)?.reason?.kind, 'stop', '换了人并且写完了')
+
+  // 「换人」这件事要能在事件日志里看见，否则用户只看到队首被莫名跳过。
+  const rows = h.events.filter((event) => event.kind === 'ceiling-rotate')
+  assert.equal(rows.length, 1, '攒够次数时记一条，且只记一条')
+  assert.equal(rows[0].provider, 'alpha')
+  assert.equal(rows[0].model, 'one')
+  assert.equal(rows[0].to, 'beta/one')
+  assert.equal(rows[0].count, 2)
+})
+
+await check('只撞了一次时，日志里不该有「跳过队首」的记录', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+  await drain(h.adapter.stream(ceilingOpts('s-once')))
+  assert.equal(h.events.filter((event) => event.kind === 'ceiling-rotate').length, 0)
+})
+
+await check('正常写完一轮就把撞上限的账清掉，下一个任务重新从队首数', async () => {
+  const scripts = new Map([
+    [routeKey('alpha', 'one'), truncatedSilent()],
+    [routeKey('beta', 'one'), ok('不该轮到我')],
+  ])
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts,
+  })
+  const opts = ceilingOpts('s-clear')
+
+  await drain(h.adapter.stream(opts)) // 账 = 1
+  scripts.set(routeKey('alpha', 'one'), ok('这一轮写完了'))
+  await drain(h.adapter.stream(opts)) // 正常提交 → 账清空
+  scripts.set(routeKey('alpha', 'one'), truncatedSilent())
+
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream(opts))
+  // 账要是没清，这里就已经攒到 3、该轮 beta 了。
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '写完一轮之后重新从 1 开始数')
+})
+
+await check('连着撞就往前挪一格：每个模型试两次，然后轮到下一个', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), truncatedSilent()],
+    ]),
+  })
+  const opts = ceilingOpts('s-rotate-round')
+
+  // 账按会话累加而不是按模型 —— 否则换到 beta 之后再撞一次就会「重置」，
+  // 下一轮又回到 alpha，在两个模型之间来回打转。
+  const picks = []
+  for (let round = 0; round < 5; round += 1) {
+    h.llm.calls.length = 0
+    await drain(h.adapter.stream(opts))
+    picks.push(commands(h.llm)[0])
+  }
+  assert.deepEqual(
+    picks,
+    [
+      routeKey('alpha', 'one'),
+      routeKey('alpha', 'one'),
+      routeKey('beta', 'one'),
+      routeKey('beta', 'one'),
+      routeKey('alpha', 'one'),
+    ],
+    '每个模型连着试两次就该轮到下一个，转完一圈从头接上',
+  )
+})
+
+await check('压缩会话 / 起标题这类内部调用不参与撞上限的账', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+  const opts = { ...ceilingOpts('s-purpose'), purpose: 'session-title' }
+
+  // 连着两次内部调用都撞上限：它们共用 sessionId，却和用户看到的这一轮无关。
+  await drain(h.adapter.stream(opts))
+  await drain(h.adapter.stream(opts))
+
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream(ceilingOpts('s-purpose')))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '内部调用不该替用户把账记上')
+})
+
+await check('没有 sessionId 就不记账：宁可死磕一个模型，也不能把账算到别人头上', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+  const opts = { provider: ROUTE, model: 'auto', messages: [user('写一篇长的')] }
+
+  await drain(h.adapter.stream(opts))
+  await drain(h.adapter.stream(opts))
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream(opts))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')])
+  assert.equal(h.adapter.ceiling.size, 0)
+})
+
+await check('队列里只剩一个候选时无处可换：不轮换，也不记假的换人日志', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    settings: { enabled: false },
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+  const opts = ceilingOpts('s-single')
+  await drain(h.adapter.stream(opts))
+  await drain(h.adapter.stream(opts))
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream(opts))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '总开关关掉时永远用队首')
+  assert.equal(h.events.filter((event) => event.kind === 'ceiling-rotate').length, 0, '换不成人就不该写日志')
+})
+
 // 5c · 本机网络没通时不带「继续」
 await check('本机网络故障：重试与换人都不带「继续」（网线没通，继续是空话）', async () => {
   const h = await harness({
