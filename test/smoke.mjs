@@ -65,6 +65,36 @@ const noAdapter = () => async function* () {
   yield { type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: '这条路由没挂适配器' } } }
 }
 
+/** 写到一半撞上输出上限：吐了正文，但 finish 是 max-tokens。 */
+const truncated = (text = '写到一半') => async function* () {
+  yield { type: 'block-start', index: 0, blockType: 'text' }
+  yield { type: 'text-delta', index: 0, text }
+  yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+  yield { type: 'finish', reason: { kind: 'max-tokens' } }
+}
+
+/**
+ * 一个字都没吐就撞上上限 —— 线上 13 条 `NO_VISIBLE_OUTPUT` 隔离全是这一种。
+ *
+ * 逐字对应 `lib/adapter.js` 里 `failureOf()` 合成的那句
+ * 「模型以 max-tokens 结束，但整轮没有产出任何可见内容。」
+ */
+const truncatedSilent = () => async function* () {
+  yield { type: 'finish', reason: { kind: 'max-tokens' } }
+}
+
+/**
+ * 只想不写就撞上上限 —— 最容易触发同一个 bug 的真实形态。
+ *
+ * reasoning 的 `block-end` **不算**提交（见 `commitsAnswer`），所以整轮依然
+ * 「没有可见内容」，会走进同一个 `NO_VISIBLE_OUTPUT` 分支。
+ */
+const truncatedAfterReasoning = () => async function* () {
+  yield { type: 'reasoning-delta', index: 0, text: '让我想想' }
+  yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: '让我想想' } }
+  yield { type: 'finish', reason: { kind: 'max-tokens' } }
+}
+
 /** 本机 DNS 挂了 —— 逐字抄自 2026-10-14 的真实事件日志（code 是 SERVER）。 */
 const localNetwork = () => async function* () {
   yield {
@@ -224,7 +254,7 @@ async function check(name, fn) {
     console.log(`  ✓ ${name}`)
   } catch (error) {
     failed += 1
-    const head = String(error?.stack ?? error).split('\n').slice(0, 3).join('\n      ')
+    const head = String(error?.stack ?? error).split('\n').slice(0, 12).join('\n      ')
     console.error(`  ✗ ${name}\n      ${head}`)
   }
 }
@@ -316,6 +346,31 @@ await check('用户中止：原样交回，不切换', async () => {
   assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0)
 })
 
+await check('撞上限的同时用户按了停止：结局原样交回，不隔离也不换人', async () => {
+  // 用户按停止的那一刻，适配器看到的 finish 完全可能正好是 max-tokens。
+  // 这一跳必须原样收手：既不能当成「模型坏了」隔离掉，也不能换人去补。
+  //
+  // 注意这里**故意不吐任何可见内容** —— 吐了的话 `commitsAnswer` 会先把它判成
+  // 「已提交」，测的就是另一条路径了（那样测不出任何东西）。
+  const controller = new AbortController()
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'two' }],
+    scripts: new Map([
+      // 直接写成生成器函数（createLlm 会调 `script(options)`），不要写成
+      // `() => async function* () {}` —— 那样交出去的是函数本身，不是生成器对象。
+      [routeKey('alpha', 'one'), async function* () {
+        controller.abort()
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+      }],
+      [routeKey('beta', 'two'), ok('不该出现')],
+    ]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], signal: controller.signal }))
+  assert.equal(finishOf(chunks)?.reason?.kind, 'max-tokens', '结局要原样交回')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '中止了就不该再换人')
+  assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0, '撞上限不是「模型坏了」')
+})
+
 await check('上下文超长：交给 agent loop 去压缩，不切换', async () => {
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'two' }],
@@ -370,6 +425,65 @@ await check('失败一次、补一句「继续」就写完：不隔离，并记�
   const view = h.health.view(h.clock.ms, 1)
   assert.equal(view.quarantined.length, 0, '它产出内容了，不算今天出不了东西')
   assert.deepEqual(view.good.map((row) => row.key), [routeKey('alpha', 'one')], '应该记成当天已验证可用')
+})
+
+// 5b · 撞输出上限不等于「这个模型坏了」
+await check('撞输出上限、一个字都没吐：原样交出 max-tokens，且**不隔离**', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写一首诗')] }))
+  // 结局必须原样是 max-tokens：agent loop 靠它落 turn/end，轮级的「自动继续」
+  // 才认得出这是「还没写完」而不是「这一轮失败了」。
+  assert.equal(finishOf(chunks)?.reason?.kind, 'max-tokens', 'finish 必须原样保留 max-tokens')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '撞上限不是换人的理由')
+
+  const view = h.health.view(h.clock.ms, 1)
+  assert.equal(view.quarantined.length, 0, '它在写，只是被截断了 —— 绝不能隔离')
+  assert.equal(view.good.length, 0, '没吐出可见内容，也不算「已验证可用」')
+})
+
+await check('撞输出上限、只想了没写：同样不隔离（reasoning 的 block-end 不算提交）', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedAfterReasoning()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  assert.equal(finishOf(chunks)?.reason?.kind, 'max-tokens')
+  // 扣住的东西要原样放出来，不能把「想了一半」的推理吞掉。
+  assert.equal(chunks.filter((c) => c.type === 'reasoning-delta').length, 1, '扣住的推理也要交出去')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')])
+  assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0)
+})
+
+await check('撞输出上限之后，下一个任务仍然从原来那个模型开始', async () => {
+  // 这条是用户报的那个现象的直接回归：一旦被隔离，下一轮接力就从别人开始了，
+  // 「用原模型补『继续』」再也无从谈起。
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), truncatedSilent()],
+      [routeKey('beta', 'one'), ok('不该轮到我')],
+    ]),
+  })
+
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0)
+
+  // 第二个任务：队列的头仍然是 alpha。
+  h.llm.calls.length = 0
+  const second = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('第二个任务')] }))
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '第二个任务必须还从 alpha 开始')
+  assert.equal(finishOf(second)?.reason?.kind, 'max-tokens')
 })
 
 // 5c · 本机网络没通时不带「继续」

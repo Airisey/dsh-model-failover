@@ -92,6 +92,18 @@ class StubAdapter extends LlmAdapter {
       yield { type: 'finish', reason: { kind: 'error', failure: outcome.failure } }
       return
     }
+    // 撞到输出上限：真实适配器把供应商的 length / max_tokens 结束原因映射成
+    // `{ kind: 'max-tokens' }`（dsh-llm-deepseek lib/index.js:1906 的
+    // `case "max_tokens"`、dsh-llm-pi-ai lib/index.js:1422 的 `case "length"`），
+    // 所以这里必须按同一个形状造，才测得到真实路径。
+    if (outcome.kind === 'truncated') {
+      if (outcome.text !== undefined) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: outcome.text }
+      }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+      return
+    }
     yield { type: 'block-start', index: outcome.partial === undefined ? 0 : 1, blockType: 'text' }
     yield { type: 'text-delta', index: outcome.partial === undefined ? 0 : 1, text: outcome.text }
     yield { type: 'finish', reason: { kind: 'stop' } }
@@ -112,6 +124,9 @@ const LOCAL_NETWORK = {
 
 /** 远端 5xx：不是本机网络问题，该照常带「继续」。 */
 const UPSTREAM_5XX = { kind: 'error', failure: { message: 'upstream returned 502 Bad Gateway', code: 'SERVER' } }
+
+/** 撞到输出上限，一个字都没吐 —— 线上 13 条 NO_VISIBLE_OUTPUT 隔离的真实形态。 */
+const TRUNCATED_SILENT = { kind: 'truncated' }
 
 const lastText = (messages) =>
   messages
@@ -516,6 +531,42 @@ await check('真注册表：本机网络故障时不带「继续」，但远端 
     assert.equal(shape(delta.calls[0].messages), 'user:写一首诗 → user:继续', '换人也该带「继续」')
   } finally {
     h2.dispose()
+  }
+})
+
+await check('真注册表：撞输出上限时原样交出 max-tokens，不隔离、不换人', async () => {
+  const alpha = new StubAdapter('alpha', () => TRUNCATED_SILENT)
+  const beta = new StubAdapter('beta', () => OK('不该轮到我'))
+  const h = await boot({
+    order: [
+      { provider: 'alpha', model: 'one' },
+      { provider: 'beta', model: 'one' },
+    ],
+    adapters: { alpha, beta },
+  })
+  try {
+    const result = await h.stream()
+    // 真宿主的 finish 语义必须原样保留：agent loop 靠它落
+    // `turn/end { kind: 'max-tokens' }`，轮级的自动「继续」才认得出这是
+    // 「还没写完」而不是「这一轮失败了」。
+    assert.equal(result.finish?.reason?.kind, 'max-tokens', 'finish 必须原样是 max-tokens')
+    assert.equal(alpha.calls.length, 1, '撞上限不该重发')
+    assert.equal(beta.calls.length, 0, '撞上限不该换人')
+
+    // 被隔离的话，下一个任务就会从 beta 开始 —— 那正是用户报的现象。
+    // 撞上限这条路径**什么都不该写**：既不隔离，也不算「已验证可用」，
+    // 所以 state.json 很可能压根没被创建，缺文件本身就是「没记录」。
+    let state
+    try {
+      state = h.state()
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      state = { quarantine: {}, good: {} }
+    }
+    assert.deepEqual(Object.keys(state.quarantine ?? {}), [], '撞上限不是「今天出不了东西」，绝不能隔离')
+    assert.deepEqual(Object.keys(state.good ?? {}), [], '一个字都没吐出来，也不算「已验证可用」')
+  } finally {
+    h.dispose()
   }
 })
 

@@ -105,6 +105,12 @@
 **「继续」是补在原消息后面的**，不是替换。所以下一个模型看到的是完整的用户请求 + 一句「继续」，
 不会丢上下文。补发次数有上限（3 次），不会无限啰嗦。
 
+**撞到 token 上限不算「这个模型坏了」。**
+它明明在写，只是被截断在半句话上 —— 交出去的结局原样还是「撞上限」，不隔离、不换人，
+所以下一轮补「继续」时用的**还是原来那个模型**。这一条看着琐碎，却是最容易写错的地方：
+把「被截断」和「产不出内容」混成一个 `NO_VISIBLE_OUTPUT`，模型当场就被隔离掉，
+接力起点从此换成队列里的下一个，「用原模型补继续」也就再也无从谈起。
+
 **中止和上下文超长不算「模型坏了」。**
 用户自己按了停止 → 原样交回；上下文超长 → 交给 agent loop 去压缩，都不切换、不隔离。
 只有额度/凭据/网络/上游这一类「这个模型现在就是不行」的错才触发接力。
@@ -118,7 +124,11 @@
 
 ## 配置
 
-设置页里能改的都存在 `settings.json`；重置时间支持 0-23 的整点。默认值：
+设置页分五张卡片，**同一类设置放在一起**：今日状态（逻辑日、距重置、当前起点、隔离数，
+以及「每天几点算新的一天」）、优先级队列、今日隔离名单、接力规则（启用、同模型重发、
+重发内容、全部隔离时是否硬试）、自动「继续」（开关、两种触发、次数上限、等待秒数）、
+事件日志（列表本身 + 记不记、留多少条）。设置页里能改的都存在 `settings.json`；
+重置时间支持 0-23 的整点。默认值：
 `resetHour: 1`、`retrySameModelOnce: true`、`continueText: "继续"`、`retryWhenAllQuarantined: true`、
 `autoContinue: true`、`autoContinueOnFailure: true`、`autoContinueOnMaxTokens: true`、`autoContinueLimit: 3`、
 `continueDelaySec: 5`、`keepEventLog: true`、`eventLogLimit: 200`。
@@ -126,9 +136,9 @@
 ## 开发
 
 ```
-node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线、补发节奏（28 项）
+node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线、补发节奏（31 项）
 node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求（26 项）
-node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（11 项）
+node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（12 项）
 node test/autocontinue.mjs # 自动「继续」的判定、节流与等待、本机网络判据（43 项）
 ```
 
