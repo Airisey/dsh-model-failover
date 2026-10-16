@@ -81,6 +81,7 @@ window.__ModuleLoader__.load({
 .mf-event { display: flex; gap: 8px; align-items: baseline; }
 .mf-event-time { flex: none; opacity: .5; font-variant-numeric: tabular-nums; }
 .mf-empty { opacity: .55; font-size: 12px; padding: 4px 0; }
+.mf-tail { font-size: 11.5px; line-height: 1.5; opacity: .55; padding: 2px 0 0; user-select: none; }
 `
 
     // ── 文案 ────────────────────────────────────────────────────────────────
@@ -167,6 +168,7 @@ window.__ModuleLoader__.load({
         evRollover: '跨过 {hour} 点：{from} → {to}，隔离名单已清空',
         evReset: '手动解除隔离，清了 {count} 个',
         evForget: '重置了今天的运行状态',
+        tailModel: '本轮：{label}',
       },
       en: {
         nav: 'Model Relay',
@@ -250,6 +252,7 @@ window.__ModuleLoader__.load({
         evRollover: 'Crossed {hour}:00 — {from} → {to}, quarantine cleared',
         evReset: 'Quarantine cleared by hand — {count} released',
         evForget: 'Today’s runtime state was reset',
+        tailModel: 'Turn: {label}',
       },
     }
 
@@ -862,6 +865,93 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // ── 轮尾小字：接力插过手的那一轮，是谁在跑 ──────────────────────────────
+    /**
+     * 便签缓存（会话 → 这个会话最近的几条）。
+     *
+     * 一个会话里有几十条轮尾，它们各自只想知道「我这一轮是不是接力补出来的、
+     * 是谁跑的」。所以按会话缓存、把同时挂载的那一批请求合并成一个，并且只在
+     * 缓存里真的没有这一轮时才去问后端 —— 否则每挂一次轮尾就打一次接口。
+     */
+    const NOTE_TTL_MS = 3000
+    const noteCache = new Map()
+
+    function noteRow(sessionId) {
+      let row = noteCache.get(sessionId)
+      if (row === undefined) {
+        row = { at: 0, rows: [], inflight: false, waiters: new Set() }
+        noteCache.set(sessionId, row)
+      }
+      return row
+    }
+
+    /**
+     * @param {string} sessionId
+     * @param {boolean} force - 缓存里没有目标轮时置位，越过最短间隔问一次。
+     */
+    function ensureNotes(sessionId, force) {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const row = noteRow(sessionId)
+      if (row.inflight) return
+      if (force !== true && Date.now() - row.at < NOTE_TTL_MS) return
+      row.inflight = true
+      api(`/notes?sessionId=${encodeURIComponent(sessionId)}`)
+        .then((payload) => {
+          row.rows = Array.isArray(payload?.notes) ? payload.notes : []
+        })
+        .catch(() => {
+          /* 便签纯装饰：后端没答上来时那一轮干脆不显示小字。 */
+        })
+        .finally(() => {
+          row.at = Date.now()
+          row.inflight = false
+          const waiters = [...row.waiters]
+          row.waiters.clear()
+          for (const fn of waiters) fn()
+        })
+    }
+
+    /** 这个会话的便签；后端答上来之后会自己重渲染一次。 */
+    function useTurnNotes(sessionId, turn) {
+      const [revision, setRevision] = useState(0)
+      useEffect(() => {
+        if (typeof sessionId !== 'string' || sessionId === '') return undefined
+        // 轮号不是数就根本渲染不出东西，连问都不必问。
+        if (!Number.isFinite(turn)) return undefined
+        const row = noteRow(sessionId)
+        const bump = () => setRevision((value) => value + 1)
+        row.waiters.add(bump)
+        const known = row.rows.some((item) => item.turn === turn)
+        ensureNotes(sessionId, !known)
+        return () => {
+          row.waiters.delete(bump)
+        }
+      }, [sessionId, turn])
+      return useMemo(() => noteCache.get(sessionId)?.rows ?? [], [sessionId, revision])
+    }
+
+    /**
+     * 轮尾小字。
+     *
+     * 只在接力插过手的那几轮出现：自动补发了「继续」的那一轮（这一轮是谁跑到
+     * 半截的），以及补发出来的那一轮（换成了谁）。普通对话的轮尾一个字都不加。
+     *
+     * `turnTail` 是会话作用域的 list 插槽，绑定的 props 里有 `sessionId`（由
+     * dsh-client-ui-session 的 scope 绑定注入）和 `turn`。
+     */
+    function RelayTail(props) {
+      const { sessionId, turn } = props
+      const t = props?.t
+      const rows = useTurnNotes(sessionId, turn)
+      if (!Number.isFinite(turn)) return null
+      const hit = rows.find((row) => row.turn === turn)
+      if (hit === undefined) return null
+      const label = typeof hit.label === 'string' && hit.label !== ''
+        ? hit.label
+        : `${hit.provider} / ${hit.model}`
+      return h('div', { className: 'mf-tail' }, t('tailModel', { label }))
+    }
+
     // ── 挂载 ────────────────────────────────────────────────────────────────
     /**
      * @param {any} ctx - 客户端 cordis 上下文。
@@ -890,6 +980,15 @@ window.__ModuleLoader__.load({
         label: () => t('nav'),
         locale: NS,
       }, (props) => h(SettingsPage, { ...props, t: props?.t ?? t, ctx })))
+
+      // 轮尾小字。这条插槽由 dsh-client-ui-chat 声明，我们只往里加一条，
+      // **不要**再声明它的子插槽（那是 chat 自己的事，重复声明会直接抛错）。
+      ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+        name: 'conversation.chat.turnTail',
+        id: 'model-failover:relay-tail',
+        order: 20,
+        locale: NS,
+      }, (props) => h(RelayTail, { ...props, t: props?.t ?? t })))
     }
 
     exports.apply = apply

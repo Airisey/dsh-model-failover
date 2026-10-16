@@ -36,6 +36,7 @@ import {
   splitKey,
 } from './lib/constants.js'
 import { DailyHealth, nextResetAt, normalizeState } from './lib/health.js'
+import { TurnNotes } from './lib/notes.js'
 import { JsonFile, dataDir, removeFile } from './lib/store.js'
 import { rejectionFor } from './lib/trust.js'
 
@@ -63,6 +64,13 @@ const AUTO_CONTINUE_HARD_LIMIT = 20
 
 /** 「继续」前的等待秒数上限：再多就不如让用户自己决定什么时候重试了。 */
 const CONTINUE_DELAY_HARD_LIMIT = 300
+
+/**
+ * 一个会话最多回给设置页几条「自动补发那一轮是谁在跑」的便签。
+ *
+ * 浏览器半身只用它给轮尾小字查表，够看即可；留太多只是让每次轮询的响应变胖。
+ */
+const NOTES_PER_SESSION = 40
 
 /**
  * 把任意 JSON 收敛成设置形状。任何一项缺失或类型不对都回落到默认值。
@@ -211,11 +219,26 @@ export function apply(ctx, _config) {
     logger: { warn: (message) => logger.warn?.(message) },
   })
 
+  /**
+   * 「这个会话刚才跑的是谁」的便签，只活在内存里。
+   *
+   * 适配器每跳写一次（它拿得到 sessionId 但拿不到轮号），轮级那层在 turn/end
+   * 时读出来配上轮号（它拿得到轮号但看不见模型）。理由与形状见 lib/notes.js。
+   */
+  const notes = new TurnNotes()
+
+  /** 把 `provider / model` 换成人看的名字；清单里查不到就原样回落。 */
+  const labelOf = (provider, model) => {
+    const hit = catalog.cached().find((row) => row.provider === provider && row.model === model)
+    return hit === undefined ? `${provider} / ${model}` : `${hit.providerName} · ${hit.name}`
+  }
+
   const adapter = new FailoverAdapter({
     llm: ctx.llm,
     settings: settingsFile,
     health,
     catalog,
+    notes,
     log: {
       warn: (message) => logger.warn?.(`model-failover: ${message}`),
       push: (event) => pushEvent(event),
@@ -282,10 +305,6 @@ export function apply(ctx, _config) {
     const settings = settingsFile.get()
     const view = health.view(now, settings.resetHour)
     const entries = catalog.cached()
-    const labelOf = (provider, model) => {
-      const hit = entries.find((row) => row.provider === provider && row.model === model)
-      return hit === undefined ? `${provider} / ${model}` : `${hit.providerName} · ${hit.name}`
-    }
     const decorate = (row) => ({ ...row, ...splitKey(row.key), label: labelOf(row.provider, row.model) })
     return {
       ok: true,
@@ -361,12 +380,16 @@ export function apply(ctx, _config) {
     }
 
     let path = '/'
+    let sessionId
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
       path = url.pathname
       if (path.startsWith(API_PREFIX)) path = path.slice(API_PREFIX.length)
       if (path === '') path = '/'
       if (path.length > 1 && path.endsWith('/')) path = path.replace(/\/+$/, '')
+      // 浏览器半身问「我这个会话里哪几轮是自动补发的」时带上它。
+      const asked = url.searchParams.get('sessionId')
+      if (asked !== null && asked !== '') sessionId = asked
     } catch (error) {
       sendJson(res, 400, { ok: false, error: `无法解析请求路径：${String(error?.message ?? error)}` })
       return
@@ -378,6 +401,19 @@ export function apply(ctx, _config) {
     try {
       if (method === 'GET' && (path === '/' || path === '/state')) {
         sendJson(res, 200, snapshot(now))
+        return
+      }
+
+      // 轮尾小字专用：只回这一个会话的几条便签，别的一律不带。
+      //
+      // 为什么不复用 /state：那个响应里有整个模型清单、隔离名单和几十条事件，
+      // 而轮尾每挂一次就要问一次。为了一句小字拖几十 KB 下来不划算。
+      if (method === 'GET' && path === '/notes') {
+        const rows = notes.forSession(sessionId, NOTES_PER_SESSION).map((row) => ({
+          ...row,
+          label: labelOf(row.provider, row.model),
+        }))
+        sendJson(res, 200, { ok: true, notes: rows })
         return
       }
 
@@ -444,6 +480,7 @@ export function apply(ctx, _config) {
     const autoContinue = new AutoContinue({
       agents: scoped.agents,
       settings: settingsFile,
+      notes,
       log: {
         info: (message) => logger.info?.(`model-failover: ${message}`),
         warn: (message) => logger.warn?.(`model-failover: ${message}`),

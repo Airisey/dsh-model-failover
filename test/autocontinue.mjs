@@ -18,6 +18,7 @@ process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'model-failover-auto-'))
 const { AutoContinue, autoContinueTrigger, continueUserMessage, AUTO_CONTINUE_SKIP_CODES } =
   await import('../lib/autocontinue.js')
 const { LOCAL_NETWORK_CODES, isLocalNetworkFailure } = await import('../lib/network.js')
+const { TurnNotes } = await import('../lib/notes.js')
 const { DEFAULT_SETTINGS } = await import('../lib/constants.js')
 const { normalizeSettings } = await import('../index.js')
 
@@ -54,8 +55,9 @@ const settingsOf = (overrides = {}) => ({ ...DEFAULT_SETTINGS, ...overrides })
  * @param {() => number} [options.now] - 覆盖时钟。
  * @param {number} [options.pendingTtlMs] - 覆盖标记有效期。
  * @param {(ms: number) => Promise<void>} [options.sleep] - 覆盖等待实现。
+ * @param {any} [options.notes] - 轮尾便签收集器（TurnNotes）；不传就不记。
  */
-function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = false, now, pendingTtlMs, sleep } = {}) {
+function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = false, now, pendingTtlMs, sleep, notes } = {}) {
   const session = { id: 's1' }
   const sent = []
   const agent = {
@@ -78,6 +80,7 @@ function makeHarness({ settings = settingsOf(), status = 'idle', hasPending = fa
     log: { info: () => {}, warn: (m) => warnings.push(m), push: (e) => events.push(e) },
     ...(now === undefined ? {} : { now }),
     ...(pendingTtlMs === undefined ? {} : { pendingTtlMs }),
+    ...(notes === undefined ? {} : { notes }),
     sleep: sleep ?? (async (ms) => { waits.push(ms) }),
   })
   const end = (reason, turn = 1) => ({ type: 'turn/end', data: { turn, reason } })
@@ -552,6 +555,80 @@ await check('没有 id 的事件主体直接忽略', async () => {
   h.auto.observe({}, h.end({ kind: 'max-tokens' }))
   await settle()
   assert.equal(h.sent.length, 0)
+})
+
+// ── 轮尾便签 ────────────────────────────────────────────────────────────────
+// 便签要等 turn/end 才知道那一轮是谁跑的，而模型身份只有适配器知道（GenerateOptions
+// 带 sessionId 不带轮号），所以是两段式配对：适配器 remember → 这里 note。
+
+process.stdout.write('autocontinue: 轮尾便签\n')
+
+const noteOf = (rows, index) => rows.map((row) => row.turn + ':' + row.trigger + ':' + row.provider + '/' + row.model)[index]
+
+await check('触发补发的那一轮，记的是「谁跑到半截」', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 1))
+
+  const rows = notes.forSession('s1')
+  assert.equal(rows.length, 1)
+  assert.equal(noteOf(rows, 0), '1:max-tokens:alpha/one')
+})
+
+await check('补发出来的那一轮，记的是「接手的是谁」', async () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'RATE_LIMIT' } }, 1))
+  await settle()
+  assert.equal(h.sent.length, 1, '应该真的补发了')
+
+  h.auto.observe(h.session, h.start(2))
+  notes.remember('s1', { provider: 'beta', model: 'two', at: 2 })
+  h.auto.observe(h.session, h.end({ kind: 'completed' }, 2))
+
+  const rows = notes.forSession('s1')
+  assert.equal(rows.length, 2)
+  assert.equal(noteOf(rows, 1), '2:auto:beta/two')
+})
+
+await check('接力没插手的轮不留痕', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  h.auto.observe(h.session, h.start(5))
+  h.auto.observe(h.session, h.end({ kind: 'completed' }, 5))
+  assert.deepEqual(notes.forSession('s1'), [])
+})
+
+await check('本机网络故障跳过补发时，用户自己那一轮同样不留痕', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  h.auto.observe(h.session, h.start(6))
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } }, 6))
+  assert.deepEqual(notes.forSession('s1'), [])
+})
+
+await check('便签按会话分开', () => {
+  const notes = new TurnNotes()
+  const h = makeHarness({ notes })
+  const other = { id: 's2' }
+  notes.remember('s1', { provider: 'alpha', model: 'one', at: 1 })
+  notes.remember('s2', { provider: 'beta', model: 'two', at: 2 })
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 1))
+  h.auto.observe(other, h.end({ kind: 'max-tokens' }, 1))
+  assert.equal(notes.forSession('s1')[0].provider, 'alpha')
+  assert.equal(notes.forSession('s2')[0].provider, 'beta')
+})
+
+await check('没有便签收集器时不该炸（宿主可以不给）', async () => {
+  const h = makeHarness()
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 1))
+  await settle()
+  assert.equal(h.sent.length, 1, '没便签也该照常补发')
+  assert.equal(h.warnings.length, 0)
 })
 
 // ── 设置归一 ────────────────────────────────────────────────────────────────

@@ -456,7 +456,7 @@ await check('apply() 注册中英字典、注入样式表、插一条 settings.s
   assert.equal(styleSheets.length, 1, '应注入一张样式表')
   assert.equal(styleSheets[0].textContent.includes('.mf-root'), true)
 
-  assert.equal(sections.length, 1)
+  assert.equal(sections.length, 2, '设置页一条 + 轮尾小字一条')
   assert.equal(sections[0].slot, 'settings.section')
   assert.equal(sections[0].definition.name, 'settings.section')
   assert.equal(sections[0].definition.id, 'model-failover')
@@ -465,6 +465,113 @@ await check('apply() 注册中英字典、注入样式表、插一条 settings.s
   assert.equal(typeof sections[0].definition.label, 'function')
   assert.equal(typeof sections[0].definition.label(), 'string')
   assert.equal(typeof sections[0].component, 'function')
+
+  // 第二条挂的是轮尾小字。turnTail 是 ui-chat 自己声明的子插槽，我们只往里塞条目，
+  // 所以注册时不能再声明 children，否则真机上会抛「slot is already declared」。
+  assert.equal(sections[1].slot, 'conversation.chat.turnTail')
+  assert.equal(sections[1].definition.name, 'conversation.chat.turnTail')
+  assert.equal(sections[1].definition.id, 'model-failover:relay-tail')
+  assert.equal(typeof sections[1].definition.order, 'number')
+  assert.equal(sections[1].definition.locale, 'settings.modelFailover')
+  assert.equal(sections[1].definition.children, undefined, '不能重复声明 ui-chat 的子插槽')
+  assert.equal(sections[1].definition.label, undefined, '轮尾小字没有 label')
+  assert.equal(typeof sections[1].component, 'function')
+
+  assert.equal(typeof dict.zh.tailModel, 'string', '轮尾小字要有中文文案')
+})
+
+// ── 轮尾小字（conversation.chat.turnTail 里的那一条） ────────────────────────
+
+const tail = sections[1].component
+
+/** 用真字典（而不是 key 回声）来渲染，这样漏了字典键会当场露馅。 */
+const dictZh = dictionaries.get('settings.modelFailover').zh
+const t = (key, params) => {
+  let out = String(dictZh[key] ?? key)
+  for (const [name, value] of Object.entries(params ?? {})) {
+    out = out.split(`{${name}}`).join(String(value))
+  }
+  return out
+}
+
+const notesPayload = (notes) => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({ ok: true, notes }),
+})
+
+await check('轮尾小字：接力插过手的轮显示宿主给的标签，且问的是轻量 /notes 而不是 /state', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    asked.push(String(url))
+    return notesPayload([
+      { sessionId: 's-tail', turn: 7, trigger: 'max-tokens', provider: 'beta', model: 'one', at, label: 'Code99 · Beta One' },
+    ])
+  }
+  try {
+    const tree = await fresh.mount(tail({ sessionId: 's-tail', turn: 7, t }))
+    assert.equal(fresh.text(tree), '本轮：Code99 · Beta One')
+    assert.equal(asked.length, 1)
+    assert.ok(asked[0].includes('/api/dsh-model-failover/notes'), `应问便签端点，实际是：${asked[0]}`)
+    assert.ok(asked[0].includes('sessionId=s-tail'), '应带上当前会话 id')
+    assert.ok(!asked[0].includes('/state'), '不该为一句小字去拉整份状态')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('轮尾小字：我们没插手的轮什么都不显示', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => notesPayload([
+    { sessionId: 's-quiet', turn: 4, trigger: 'error', provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' },
+  ])
+  try {
+    const tree = await fresh.mount(tail({ sessionId: 's-quiet', turn: 5, t }))
+    assert.equal(fresh.text(tree), '', '没有对应便签时应渲染成空')
+    assert.equal(fresh.nodes.length, 0, '不该留一个空壳 div')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('轮尾小字：缺会话 id 或轮号非法时既不发请求也不渲染', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url) => { asked.push(String(url)); return notesPayload([]) }
+  try {
+    assert.equal(fresh.text(await fresh.mount(tail({ turn: 3, t }))), '', '没有 sessionId')
+    assert.equal(fresh.text(await fresh.mount(tail({ sessionId: 's-x', t }))), '', '没有 turn')
+    assert.equal(fresh.text(await fresh.mount(tail({ sessionId: 's-x', turn: '7', t }))), '', 'turn 不是数字')
+    assert.equal(asked.length, 0, '这几种情形都不该发请求')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('轮尾小字：3 秒 TTL 内不重复问，换一个轮号才会再问', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    asked.push(String(url))
+    return notesPayload([
+      { sessionId: 's-cache', turn: 3, trigger: 'error', provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' },
+    ])
+  }
+  try {
+    await fresh.mount(tail({ sessionId: 's-cache', turn: 3, t }))
+    assert.equal(asked.length, 1)
+    await fresh.mount(tail({ sessionId: 's-cache', turn: 9, t }))
+    assert.equal(asked.length, 2, '换轮号说明缓存里没有，得再问一次')
+    await fresh.mount(tail({ sessionId: 's-cache', turn: 3, t }))
+    assert.equal(asked.length, 2, '回到已经问过的轮号，TTL 内不该再问')
+  } finally {
+    globalThis.fetch = saved
+  }
 })
 
 // ── 首帧 / 错误态（各自一个全新的渲染器，避免和别的用例串味） ────────────────

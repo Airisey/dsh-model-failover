@@ -27,6 +27,7 @@ const { Catalog } = await import('../lib/catalog.js')
 const { DailyHealth, normalizeState } = await import('../lib/health.js')
 const { JsonFile } = await import('../lib/store.js')
 const { DEFAULT_SETTINGS, ROUTE, routeKey } = await import('../lib/constants.js')
+const { TurnNotes } = await import('../lib/notes.js')
 
 // ── 假的宿主 ────────────────────────────────────────────────────────────────
 
@@ -209,17 +210,19 @@ async function harness({ order, scripts, settings: overrides = {}, at = new Date
   const events = []
   // 真的等 5 秒会让整套测试慢得没法跑；记下每次等待的时长，立刻返回。
   const waits = []
+  const notes = new TurnNotes()
   const adapter = new FailoverAdapter({
     llm,
     settings,
     health,
     catalog,
+    notes,
     log: { warn: () => {}, push: (event) => events.push(event) },
     now: () => clock.ms,
     sleep: async (ms) => { waits.push(ms) },
   })
 
-  return { llm, clock, settings, health, catalog, adapter, events, waits }
+  return { llm, clock, settings, health, catalog, adapter, notes, events, waits }
 }
 
 /** 收集整条流。 */
@@ -979,6 +982,64 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
   }
 })
 
+// 13.5 · 轮尾便签：适配器那一半的配对
+// 轮尾小字要知道「这一轮是谁跑的」，而模型身份只有适配器知道（GenerateOptions 带
+// sessionId、不带轮号），所以适配器负责按会话记下「最后真正产出内容的那个模型」。
+
+await check('轮尾便签：适配器按会话记下最后产出内容的模型', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), ok('好')]]),
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')], sessionId: 'sess-1' }))
+
+  assert.equal(h.notes.latest('sess-1').provider, 'alpha')
+  assert.equal(h.notes.latest('sess-1').model, 'one')
+  assert.equal(h.notes.latest('sess-2'), undefined, '别的会话不该被顺带写上')
+})
+
+await check('轮尾便签：换人之后记的是最后接手的那个', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('换我上')]]),
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')], sessionId: 'sess-1' }))
+
+  assert.equal(h.notes.latest('sess-1').provider, 'beta', '半路换人时要记接手的那个')
+})
+
+await check('轮尾便签：撞输出上限也算这一轮的模型（那一轮确实跑过）', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), truncated('写到一半')]]),
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')], sessionId: 'sess-1' }))
+
+  assert.equal(h.notes.latest('sess-1').provider, 'alpha')
+})
+
+await check('轮尾便签：会话标题 / 压缩这类内部调用不记（它们共用 sessionId）', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), ok('标题')]]),
+  })
+  await drain(h.adapter.stream({
+    provider: ROUTE, model: 'auto', messages: [user('起个标题')], sessionId: 'sess-1', purpose: 'session-title',
+  }))
+
+  assert.equal(h.notes.latest('sess-1'), undefined, '内部用途与用户看到的那一轮无关')
+})
+
+await check('轮尾便签：没有 sessionId 时什么都不记，也不炸', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    scripts: new Map([[routeKey('alpha', 'one'), ok('好')]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')] }))
+  assert.equal(textOf(chunks), '好')
+  assert.equal(h.notes.forSession('sess-1').length, 0)
+})
+
 // 14 · 「自动继续」的宿主接线
 await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继续」', async () => {
   const freshHome = mkdtempSync(join(tmpdir(), 'model-failover-auto-'))
@@ -993,7 +1054,9 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
 
     const llm = createLlm(new Map())
     llm.register('alpha', [{ id: 'one', name: 'Alpha One' }])
-    llm.registerAdapter = () => () => {}
+    // 记下插件挂上来的那个适配器：下面要拿它走一遍真 stream，好把便签喂进去。
+    let registered = null
+    llm.registerAdapter = (routes, adapter) => { registered = { routes, adapter }; return () => {} }
     llm.registerConfigurableProviders = () => ({ replace: () => {}, dispose: () => {}, entries: [] })
 
     const sent = []
@@ -1131,6 +1194,39 @@ await check('宿主半身：本轮失败 / 输出撞上限时自动补发「继�
     await settle()
     assert.equal(sent.length, 4, '本轮失败仍应补发')
     assert.equal(sent[3].content[0].text, '继续')
+
+    // ── 轮尾便签：真适配器 + 真监听 + 真 /notes 端点串一遍 ──────────────────
+    // 这一段是整条链路的合龙测试：适配器按 sessionId 记下是谁跑的（它看得见
+    // sessionId、看不见轮号），监听器在 turn/end 时补上轮号，/notes 再把它连同
+    // 显示用的标签一起交出去。
+    await call('POST', '/api/dsh-model-failover/settings', { autoContinue: true, autoContinueOnMaxTokens: true })
+    assert.equal(typeof registered?.adapter?.stream, 'function', 'index.js 应把适配器挂到注册表上')
+    await drain(registered.adapter.stream({
+      provider: 'model-failover',
+      model: 'auto',
+      messages: [user('写点东西')],
+      sessionId: 's1',
+    }))
+
+    fire('turn/start', { turn: 21 })
+    fire('turn/end', { turn: 21, reason: { kind: 'max-tokens' } })
+    await settle()
+    assert.equal(sent.length, 5, '第 21 轮撞上限仍应补发（上面刚把开关打开）')
+
+    const notesRes = await call('GET', '/api/dsh-model-failover/notes?sessionId=s1')
+    assert.equal(notesRes.status, 200)
+    assert.equal(notesRes.json.ok, true)
+    const mine = notesRes.json.notes.filter((row) => row.turn === 21)
+    assert.equal(mine.length, 1, `/notes 里应该有第 21 轮：${JSON.stringify(notesRes.json)}`)
+    assert.equal(mine[0].trigger, 'max-tokens')
+    assert.equal(mine[0].provider, 'alpha')
+    assert.equal(mine[0].model, 'one')
+    assert.equal(typeof mine[0].label, 'string')
+    assert.ok(mine[0].label.length > 0, '要有给用户看的标签')
+
+    const stranger = await call('GET', '/api/dsh-model-failover/notes?sessionId=s-nobody')
+    assert.equal(stranger.status, 200)
+    assert.deepEqual(stranger.json.notes, [], '别的会话不该看见这条便签')
   } finally {
     process.env.DSH_HOME = previous
     rmSync(freshHome, { recursive: true, force: true })
