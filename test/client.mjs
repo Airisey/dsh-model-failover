@@ -306,7 +306,8 @@ const initialState = () => ({
     autoContinue: true,
     autoContinueOnFailure: true,
     autoContinueOnMaxTokens: true,
-    autoContinueLimit: 3,
+    autoContinueFailureLimit: 1,
+    autoContinueMaxTokensLimit: 10,
     continueDelaySec: 5,
     keepEventLog: true,
     eventLogLimit: 200,
@@ -637,7 +638,7 @@ globalThis.fetch = async (url, init = {}) => {
           ? { provider: item.provider, model: item.model }
           : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort }))
       }
-      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueLimit', 'continueDelaySec']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -888,16 +889,22 @@ await check('乱敲的重置时间被丢弃，不会发 POST', async () => {
   assert.equal(hourInput().props.value, '23', '输入框应回滚到宿主的值')
 })
 
-await check('自动「继续」：三个开关 + 次数上限 + 等待秒数都在，且反映宿主设置', () => {
+// 同一张卡片里现在有两个 min=1 max=20 的数字框（失败上限 / 撞上限次数），
+// 光靠上下界认不出来，改用宿主渲染到 input 上的 data-name 区分。
+const nameInput = (name) => () => runtime.find(
+  (node) => node.tag === 'input' && node.props['data-name'] === name,
+)
+const failureLimitInput = nameInput('failureLimit')
+const maxTokensLimitInput = nameInput('maxTokensLimit')
+
+await check('DSH 异常：三个开关 + 两个分开的次数上限 + 等待秒数都在，且反映宿主设置', () => {
   const toggle = (label) => runtime.find((node) => node.props['aria-label'] === label)
   for (const label of ['optAutoContinue', 'optAutoOnFailure', 'optAutoOnMaxTokens']) {
     assert.equal(toggle(label).props['aria-pressed'], 'true', `${label} 应反映当前设置`)
     assert.equal(toggle(label).props.disabled, false, `${label} 在总开关打开时应可点`)
   }
-  const limit = runtime.find(
-    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
-  )
-  assert.equal(limit.props.value, '3', '次数上限应显示宿主的值')
+  assert.equal(failureLimitInput().props.value, '1', '失败上限应显示宿主的值')
+  assert.equal(maxTokensLimitInput().props.value, '10', '撞上限的次数应显示宿主的值')
 
   const delay = runtime.find(
     (node) => node.tag === 'input' && node.props.min === 0 && node.props.max === 300,
@@ -906,7 +913,7 @@ await check('自动「继续」：三个开关 + 次数上限 + 等待秒数都�
   assert.equal(delay.props.disabled, false)
 })
 
-await check('自动「继续」总开关关掉后，两个分项、次数上限和等待秒数一起置灰', async () => {
+await check('DSH 异常总开关关掉后，两个分项、两个上限和等待秒数一起置灰', async () => {
   const before = requests.length
   await runtime.find((node) => node.props['aria-label'] === 'optAutoContinue').props.onClick()
   await runtime.mount(page(props))
@@ -918,10 +925,8 @@ await check('自动「继续」总开关关掉后，两个分项、次数上限�
   const toggle = (label) => runtime.find((node) => node.props['aria-label'] === label)
   assert.equal(toggle('optAutoOnFailure').props.disabled, true, '总开关关了，分项没意义')
   assert.equal(toggle('optAutoOnMaxTokens').props.disabled, true)
-  const limit = runtime.find(
-    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
-  )
-  assert.equal(limit.props.disabled, true)
+  assert.equal(failureLimitInput().props.disabled, true)
+  assert.equal(maxTokensLimitInput().props.disabled, true)
   const delay = runtime.find(
     (node) => node.tag === 'input' && node.props.min === 0 && node.props.max === 300,
   )
@@ -945,21 +950,46 @@ await check('关掉「输出撞上限」这一项，POST 的是它自己的键',
   await runtime.mount(page(props))
 })
 
-await check('次数上限失焦后 POST autoContinueLimit，超范围夹到 1-20', async () => {
-  const limitInput = () => runtime.find(
-    (node) => node.tag === 'input' && node.props.min === 1 && node.props.max === 20,
-  )
+await check('失败上限失焦后 POST autoContinueFailureLimit，超范围夹到 1-20', async () => {
   const before = requests.length
-  limitInput().props.onChange({ target: { value: '99' } })
+  failureLimitInput().props.onChange({ target: { value: '99' } })
   await runtime.mount(page(props))
-  assert.equal(limitInput().props.value, '99', '输入框应保留用户敲进去的草稿')
-  limitInput().props.onBlur()
+  assert.equal(failureLimitInput().props.value, '99', '输入框应保留用户敲进去的草稿')
+  failureLimitInput().props.onBlur()
   await runtime.mount(page(props))
 
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
-  assert.deepEqual(posts[0].body, { autoContinueLimit: 20 })
-  assert.equal(current.settings.autoContinueLimit, 20)
+  assert.deepEqual(posts[0].body, { autoContinueFailureLimit: 20 }, '夹到硬上限 20')
+  assert.equal(current.settings.autoContinueFailureLimit, 20)
+  assert.equal(current.settings.autoContinueMaxTokensLimit, 10, '两个计数各算各的，不能串')
+
+  // 恢复，免得影响后面的用例。
+  failureLimitInput().props.onChange({ target: { value: '1' } })
+  await runtime.mount(page(props))
+  failureLimitInput().props.onBlur()
+  await runtime.mount(page(props))
+})
+
+await check('撞上限次数失焦后 POST autoContinueMaxTokensLimit，且不碰失败那个上限', async () => {
+  const before = requests.length
+  maxTokensLimitInput().props.onChange({ target: { value: '42' } })
+  await runtime.mount(page(props))
+  assert.equal(maxTokensLimitInput().props.value, '42', '输入框应保留用户敲进去的草稿')
+  maxTokensLimitInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { autoContinueMaxTokensLimit: 20 }, '夹到硬上限 20')
+  assert.equal(current.settings.autoContinueMaxTokensLimit, 20)
+  assert.equal(current.settings.autoContinueFailureLimit, 1, '两个计数各算各的，不能串')
+
+  // 恢复，免得影响后面的用例。
+  maxTokensLimitInput().props.onChange({ target: { value: '10' } })
+  await runtime.mount(page(props))
+  maxTokensLimitInput().props.onBlur()
+  await runtime.mount(page(props))
 })
 
 await check('等待秒数失焦后 POST continueDelaySec，超范围夹到 0-300', async () => {

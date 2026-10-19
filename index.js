@@ -116,10 +116,15 @@ export function normalizeSettings(raw) {
       ? Math.min(source.eventLogLimit, EVENT_LOG_HARD_LIMIT)
       : DEFAULT_SETTINGS.eventLogLimit
 
-  const autoContinueLimit =
-    Number.isInteger(source.autoContinueLimit) && source.autoContinueLimit > 0
-      ? Math.min(source.autoContinueLimit, AUTO_CONTINUE_HARD_LIMIT)
-      : DEFAULT_SETTINGS.autoContinueLimit
+  const autoContinueFailureLimit =
+    Number.isInteger(source.autoContinueFailureLimit) && source.autoContinueFailureLimit > 0
+      ? Math.min(source.autoContinueFailureLimit, AUTO_CONTINUE_HARD_LIMIT)
+      : DEFAULT_SETTINGS.autoContinueFailureLimit
+
+  const autoContinueMaxTokensLimit =
+    Number.isInteger(source.autoContinueMaxTokensLimit) && source.autoContinueMaxTokensLimit > 0
+      ? Math.min(source.autoContinueMaxTokensLimit, AUTO_CONTINUE_HARD_LIMIT)
+      : DEFAULT_SETTINGS.autoContinueMaxTokensLimit
 
   // 允许 0（= 不等待，回到旧行为），所以判据是 `>= 0` 而不是 `> 0`。
   const continueDelaySec =
@@ -142,7 +147,8 @@ export function normalizeSettings(raw) {
     autoContinue: source.autoContinue !== false,
     autoContinueOnFailure: source.autoContinueOnFailure !== false,
     autoContinueOnMaxTokens: source.autoContinueOnMaxTokens !== false,
-    autoContinueLimit,
+    autoContinueFailureLimit,
+    autoContinueMaxTokensLimit,
     continueDelaySec,
     keepEventLog: source.keepEventLog !== false,
     eventLogLimit,
@@ -349,7 +355,8 @@ export function apply(ctx, _config) {
     if ('autoContinue' in patch) next.autoContinue = patch.autoContinue !== false
     if ('autoContinueOnFailure' in patch) next.autoContinueOnFailure = patch.autoContinueOnFailure !== false
     if ('autoContinueOnMaxTokens' in patch) next.autoContinueOnMaxTokens = patch.autoContinueOnMaxTokens !== false
-    if ('autoContinueLimit' in patch) next.autoContinueLimit = patch.autoContinueLimit
+    if ('autoContinueFailureLimit' in patch) next.autoContinueFailureLimit = patch.autoContinueFailureLimit
+    if ('autoContinueMaxTokensLimit' in patch) next.autoContinueMaxTokensLimit = patch.autoContinueMaxTokensLimit
     if ('continueDelaySec' in patch) next.continueDelaySec = patch.continueDelaySec
     if ('keepEventLog' in patch) next.keepEventLog = patch.keepEventLog !== false
     if ('eventLogLimit' in patch) next.eventLogLimit = patch.eventLogLimit

@@ -132,15 +132,11 @@ window.__ModuleLoader__.load({
         detailAt: '判定时间',
         detailMessage: '报错原文',
         detailNoMessage: '宿主没有留下报错文本。',
-        relay: '接力规则',
+        relay: '模型异常',
         relayHint:
-          '一个模型产不出东西之后怎么办：先让它自己接着写、还是直接换人，以及整条队列都没人可用时怎么收场。',
+          '开着的时候，队列里的模型会一直在后台自动接力：一个产不出东西就换下一个，直到有人把这一轮做完。',
         optEnabled: '启用接力',
         optEnabledHint: '关掉后队列退化为「只使用第一个模型」。',
-        optRetrySame: '同一模型失败后先重发一次「继续」',
-        optRetrySameHint: '重发仍然产不出内容，才切到下一个模型。',
-        optContinueText: '重发内容',
-        optContinueTextHint: '默认「继续」。改成别的会原样发给模型。',
         optAllQuarantined: '全部被隔离时仍然按顺序试一遍',
         optAllQuarantinedHint: '关掉后队列里全是隔离模型时会直接报错，不再尝试。',
         optKeepLog: '记录事件日志',
@@ -150,13 +146,18 @@ window.__ModuleLoader__.load({
         optResetHour: '每天几点算新的一天',
         optResetHourHint: '到这个点隔离名单才清空。凌晨 1 点意味着 00:30 仍算昨天。',
         hourUnit: '点',
-        auto: '自动「继续」',
+        auto: 'DSH 异常',
         optAutoContinue: '自动补发「继续」',
-        optAutoContinueHint: '替你接着往下做，不用你手敲。什么时候补由下面两条决定。',
+        optAutoContinueHint:
+          '这一节对整个 DSH 生效 —— 不管你在模型选择器里挑了哪个模型，出这几种情况都会自动补一句「继续」，并不需要是「模型接力」。',
         optAutoOnFailure: '本轮运行失败时',
         optAutoOnMaxTokens: '输出撞到 token 上限、被截断时',
-        optAutoLimit: '同一段失败里最多自动补发',
-        optAutoLimitHint: '用满就停手，等你发下一句；你手动发言或本轮正常结束都会重新计数。',
+        optFailureLimit: '最多补',
+        optFailureLimitHint:
+          '运行失败往往意味着这件事现在办不成（模型不肯、工具报错），再问一遍多半还是同一个结局，所以默认只补一次。',
+        optMaxTokensLimit: '最多补',
+        optMaxTokensLimitHint:
+          '撞上限只是没写完，接着写就行，所以可以多给几次。两个上限各算各的：长文档撞上限不会吃掉失败那次。',
         optContinueDelay: '每次失败后先等',
         optContinueDelayHint: '包括第一次失败。刚撞完限流的模型马上再戳一次只会再撞一次，等一会儿更容易接上。0 = 不等。',
         optContinueDelayUnit: '秒',
@@ -225,15 +226,11 @@ window.__ModuleLoader__.load({
         detailAt: 'Recorded',
         detailMessage: 'Raw error',
         detailNoMessage: 'The host recorded no error text.',
-        relay: 'Relay rules',
+        relay: 'Model anomalies',
         relayHint:
-          'What happens after a model produces nothing: let it keep writing, hand over to the next one, and how to end when the whole queue is unusable.',
+          'While this is on, the queued models keep relaying in the background: one produces nothing and the next takes over, until someone finishes the turn.',
         optEnabled: 'Relay enabled',
         optEnabledHint: 'Turned off, the queue degrades to "always the first model".',
-        optRetrySame: 'Ask the same model to continue once',
-        optRetrySameHint: 'Only after that still yields nothing does the relay move on.',
-        optContinueText: 'Continuation text',
-        optContinueTextHint: 'Defaults to 继续. Whatever you write is sent verbatim.',
         optAllQuarantined: 'Still try the queue when all are quarantined',
         optAllQuarantinedHint: 'Turned off, an all-quarantined queue fails immediately.',
         optKeepLog: 'Keep an event log',
@@ -243,13 +240,18 @@ window.__ModuleLoader__.load({
         optResetHour: 'A new day starts at',
         optResetHourHint: 'The quarantine clears at this hour. 1 means 00:30 still counts as yesterday.',
         hourUnit: ':00',
-        auto: 'Automatic “continue”',
+        auto: 'DSH exceptions',
         optAutoContinue: 'Send “continue” for you',
-        optAutoContinueHint: 'Picks the work back up so you do not have to type it. The two rows below decide when.',
+        optAutoContinueHint:
+          'This section applies to the whole of DSH — whichever model you picked in the chooser, these two cases get an automatic “continue”. Being on the relay is not required.',
         optAutoOnFailure: 'The turn failed',
         optAutoOnMaxTokens: 'The answer hit the token ceiling',
-        optAutoLimit: 'Send at most',
-        optAutoLimitHint: 'Then it stops and waits for you; your next message or a clean turn resets the count.',
+        optFailureLimit: 'Send at most',
+        optFailureLimitHint:
+          'A failed turn usually means the task cannot proceed right now (the model refused, a tool errored); asking again tends to end the same way, so it defaults to one.',
+        optMaxTokensLimit: 'Send at most',
+        optMaxTokensLimitHint:
+          'Hitting the ceiling only means it was not finished — carrying on is normal, so this one gets more room. The two counts are independent: a long document cannot eat the failure budget.',
         optContinueDelay: 'Wait before each retry',
         optContinueDelayHint: 'Including the first failure. Re-hitting a just-rate-limited model immediately tends to hit the same wall; a pause makes it likelier to resume. 0 = no wait.',
         optContinueDelayUnit: 'sec',
@@ -692,6 +694,7 @@ window.__ModuleLoader__.load({
               value: settings.resetHour,
               min: 0,
               max: 23,
+              name: 'resetHour',
               disabled: busy,
               onCommit: (value) => { if (value !== settings.resetHour) void run('/settings', { resetHour: value }) },
             }),
@@ -779,7 +782,7 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        // ── 接力规则 ────────────────────────────────────────────────────────
+        // ── 模型异常 ────────────────────────────────────────────────────────
         Card({ title: t('relay') },
             div({ className: 'mf-note' }, t('relayHint')),
             h(ToggleRow, {
@@ -790,24 +793,6 @@ window.__ModuleLoader__.load({
               onChange: (value) => void run('/settings', { enabled: value }),
             }),
             h(ToggleRow, {
-              label: t('optRetrySame'),
-              hint: t('optRetrySameHint'),
-              checked: settings.retrySameModelOnce !== false,
-              disabled: busy,
-              onChange: (value) => void run('/settings', { retrySameModelOnce: value }),
-            }),
-            div({ className: 'mf-opt' },
-              div({ className: 'mf-opt-main' },
-                div(null, t('optContinueText')),
-                div({ className: 'mf-note' }, t('optContinueTextHint')),
-              ),
-              h(ContinueTextInput, {
-                value: settings.continueText,
-                disabled: busy,
-                onCommit: (value) => { if (value !== settings.continueText) void run('/settings', { continueText: value }) },
-              }),
-            ),
-            h(ToggleRow, {
               label: t('optAllQuarantined'),
               hint: t('optAllQuarantinedHint'),
               checked: settings.retryWhenAllQuarantined !== false,
@@ -816,7 +801,7 @@ window.__ModuleLoader__.load({
             }),
         ),
 
-        // ── 自动「继续」 ────────────────────────────────────────────────────
+        // ── DSH 异常 ────────────────────────────────────────────────────────
         Card({ title: t('auto') },
           h(ToggleRow, {
             label: t('optAutoContinue'),
@@ -831,6 +816,22 @@ window.__ModuleLoader__.load({
             disabled: busy || settings.autoContinue === false,
             onChange: (value) => void run('/settings', { autoContinueOnFailure: value }),
           }),
+          // 失败与撞上限两个上限分开摆、分开算 —— 它们的次数不该互相吃掉。
+          div({ className: 'mf-opt' },
+            div({ className: 'mf-opt-main' },
+              div(null, t('optFailureLimit')),
+              div({ className: 'mf-note' }, t('optFailureLimitHint')),
+            ),
+            h(NumberInput, {
+              value: settings.autoContinueFailureLimit,
+              min: 1,
+              max: 20,
+              name: 'failureLimit',
+              disabled: busy || settings.autoContinue === false || settings.autoContinueOnFailure === false,
+              onCommit: (value) => { if (value !== settings.autoContinueFailureLimit) void run('/settings', { autoContinueFailureLimit: value }) },
+            }),
+            span({ className: 'mf-note' }, t('times')),
+          ),
           h(ToggleRow, {
             label: t('optAutoOnMaxTokens'),
             checked: settings.autoContinueOnMaxTokens !== false,
@@ -839,15 +840,16 @@ window.__ModuleLoader__.load({
           }),
           div({ className: 'mf-opt' },
             div({ className: 'mf-opt-main' },
-              div(null, t('optAutoLimit')),
-              div({ className: 'mf-note' }, t('optAutoLimitHint')),
+              div(null, t('optMaxTokensLimit')),
+              div({ className: 'mf-note' }, t('optMaxTokensLimitHint')),
             ),
             h(NumberInput, {
-              value: settings.autoContinueLimit,
+              value: settings.autoContinueMaxTokensLimit,
               min: 1,
               max: 20,
-              disabled: busy || settings.autoContinue === false,
-              onCommit: (value) => { if (value !== settings.autoContinueLimit) void run('/settings', { autoContinueLimit: value }) },
+              name: 'maxTokensLimit',
+              disabled: busy || settings.autoContinue === false || settings.autoContinueOnMaxTokens === false,
+              onCommit: (value) => { if (value !== settings.autoContinueMaxTokensLimit) void run('/settings', { autoContinueMaxTokensLimit: value }) },
             }),
             span({ className: 'mf-note' }, t('times')),
           ),
@@ -860,6 +862,7 @@ window.__ModuleLoader__.load({
               value: settings.continueDelaySec,
               min: 0,
               max: 300,
+              name: 'continueDelay',
               disabled: busy || settings.autoContinue === false,
               onCommit: (value) => { if (value !== settings.continueDelaySec) void run('/settings', { continueDelaySec: value }) },
             }),
@@ -897,6 +900,7 @@ window.__ModuleLoader__.load({
               value: settings.eventLogLimit,
               min: 1,
               max: 2000,
+              name: 'eventLogLimit',
               disabled: busy || settings.keepEventLog === false,
               onCommit: (value) => { if (value !== settings.eventLogLimit) void run('/settings', { eventLogLimit: value }) },
             }),
@@ -908,23 +912,13 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 只在失焦/回车时提交的文本输入 —— 每敲一个字都写盘太吵。 */
-    function ContinueTextInput({ value, disabled, onCommit }) {
-      const [draft, setDraft] = useState(value)
-      useEffect(() => { setDraft(value) }, [value])
-      return h('input', {
-        className: 'mf-input',
-        type: 'text',
-        value: draft ?? '',
-        disabled,
-        onChange: (event) => setDraft(event.target.value),
-        onBlur: () => onCommit(draft),
-        onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
-      })
-    }
-
-    /** 只在失焦/回车时提交的数字输入，并对上下界做夹取。 */
-    function NumberInput({ value, min, max, disabled, onCommit }) {
+    /**
+     * 只在失焦/回车时提交的数字输入，并对上下界做夹取。
+     *
+     * `name` 只落成 `data-name`，给测试和排查用：同一张卡片里现在不止一个
+     * `min=1 max=20` 的数字框，光靠上下界认不出是哪一个。
+     */
+    function NumberInput({ value, min, max, name, disabled, onCommit }) {
       const [draft, setDraft] = useState(String(value))
       useEffect(() => { setDraft(String(value)) }, [value])
       const commit = () => {
@@ -939,6 +933,7 @@ window.__ModuleLoader__.load({
         type: 'number',
         min,
         max,
+        'data-name': name,
         value: draft,
         disabled,
         onChange: (event) => setDraft(event.target.value),

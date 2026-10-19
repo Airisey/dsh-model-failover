@@ -15,7 +15,7 @@ import { join } from 'node:path'
 // 必须早于任何 import —— store.js 的 dataDir() 读的是这个环境变量。
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'model-failover-auto-'))
 
-const { AutoContinue, autoContinueTrigger, continueUserMessage, AUTO_CONTINUE_SKIP_CODES } =
+const { AutoContinue, autoContinueTrigger, autoContinueLimitFor, continueUserMessage, AUTO_CONTINUE_SKIP_CODES } =
   await import('../lib/autocontinue.js')
 const { LOCAL_NETWORK_CODES, isLocalNetworkFailure } = await import('../lib/network.js')
 const { TurnNotes } = await import('../lib/notes.js')
@@ -424,8 +424,8 @@ await check('等待期间插件被卸载 → 收手', async () => {
 
 process.stdout.write('autocontinue: 节流与计数\n')
 
-await check('连续失败时最多补发 autoContinueLimit 次', async () => {
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 3 }) })
+await check('连着撞上限时最多补发 autoContinueMaxTokensLimit 次', async () => {
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 3 }) })
   for (let i = 0; i < 5; i += 1) {
     h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, i + 1))
     await settle()
@@ -433,11 +433,66 @@ await check('连续失败时最多补发 autoContinueLimit 次', async () => {
   assert.equal(h.sent.length, 3, '第 4、5 次必须停手')
   assert.equal(h.events.length, 3)
   assert.ok(h.warnings.some((w) => w.includes('上限')), '停手时要留下一条警告')
-  assert.equal(h.auto.counts().get('s1'), 3, '计数停在用满的位置，不清零')
+  assert.equal(h.auto.counts().get('s1')?.['max-tokens'], 3, '计数停在用满的位置，不清零')
+})
+
+await check('连着失败时最多补发 autoContinueFailureLimit 次（默认只补 1 次）', async () => {
+  const h = makeHarness({ settings: settingsOf({ autoContinueFailureLimit: 1 }) })
+  for (let i = 0; i < 4; i += 1) {
+    h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } }, i + 1))
+    await settle()
+  }
+  assert.equal(h.sent.length, 1, '失败只补一次，默认就是这个数')
+  assert.equal(h.auto.counts().get('s1')?.error, 1)
+  assert.equal(h.auto.counts().get('s1')?.['max-tokens'], undefined, '没撞过上限，那个桶就不该有')
+})
+
+await check('两个计数各算各的：撞上限用满 10 次，失败那 1 次仍然给', async () => {
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 10, autoContinueFailureLimit: 1 }) })
+  for (let i = 0; i < 12; i += 1) {
+    h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, i + 1))
+    await settle()
+  }
+  assert.equal(h.sent.length, 10, '撞上限那 10 次用满')
+  assert.equal(h.auto.counts().get('s1')?.['max-tokens'], 10)
+
+  // 紧接着这一轮真失败了 —— 失败自己的额度一次都没用过，必须还给用户。
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } }, 13))
+  await settle()
+  assert.equal(h.sent.length, 11, '撞上限用满不该吃掉失败那一次')
+  assert.equal(h.auto.counts().get('s1')?.error, 1)
+})
+
+await check('反过来也一样：失败用满之后，撞上限的次数还没动过', async () => {
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 2, autoContinueFailureLimit: 1 }) })
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } }, 1))
+  await settle()
+  assert.equal(h.sent.length, 1)
+  // 再失败一次：失败额度用满。
+  h.auto.observe(h.session, h.end({ kind: 'error', error: { code: 'SERVER', message: 'upstream returned 502 Bad Gateway' } }, 2))
+  await settle()
+  assert.equal(h.sent.length, 1, '失败额度已用满')
+
+  // 撞上限是另一份额度，一次都还没用过。
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 3))
+  await settle()
+  h.auto.observe(h.session, h.end({ kind: 'max-tokens' }, 4))
+  await settle()
+  assert.equal(h.sent.length, 3, '撞上限那两次都要补')
+  assert.equal(h.auto.counts().get('s1')?.error, 1, '失败那个桶不动')
+})
+
+await check('autoContinueLimitFor 按触发原因取各自的数，坏设置回落到 1', () => {
+  const s = settingsOf({ autoContinueMaxTokensLimit: 7, autoContinueFailureLimit: 2 })
+  assert.equal(autoContinueLimitFor(s, 'max-tokens'), 7)
+  assert.equal(autoContinueLimitFor(s, 'error'), 2)
+  assert.equal(autoContinueLimitFor({}, 'max-tokens'), 1, '设置缺失时宁可少补')
+  assert.equal(autoContinueLimitFor({ autoContinueFailureLimit: 0 }, 'error'), 1, '0 不是合法上限')
+  assert.equal(autoContinueLimitFor({ autoContinueMaxTokensLimit: '9' }, 'max-tokens'), 1, '字符串不认')
 })
 
 await check('用户自己发下一句（turn/start）会重新计数', async () => {
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 1 }) })
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 1 }) })
   h.auto.observe(h.session, h.end({ kind: 'max-tokens' }))
   await settle()
   // 驱动开始跑我们排进去的那一轮 —— 这一轮的 turn/start 是我们的。
@@ -454,7 +509,7 @@ await check('用户自己发下一句（turn/start）会重新计数', async () 
 })
 
 await check('我们自己发起的那一轮不会把自己的计数清零', async () => {
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 2 }) })
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 2 }) })
   h.auto.observe(h.session, h.end({ kind: 'max-tokens' }))
   await settle()
   h.auto.observe(h.session, h.start(2))
@@ -470,7 +525,7 @@ await check('我们自己发起的那一轮不会把自己的计数清零', asyn
 
 await check('排进去的那一轮始终没跑起来 → 标记过期后不再算作「我们的轮」', async () => {
   let clock = 1_000_000
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 1 }), now: () => clock })
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 1 }), now: () => clock })
   h.auto.observe(h.session, h.end({ kind: 'max-tokens' }))
   await settle()
   assert.equal(h.sent.length, 1)
@@ -484,10 +539,10 @@ await check('排进去的那一轮始终没跑起来 → 标记过期后不再�
 })
 
 await check('一轮正常结束会把计数清零', async () => {
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 1 }) })
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 1 }) })
   h.auto.observe(h.session, h.end({ kind: 'max-tokens' }))
   await settle()
-  assert.equal(h.auto.counts().get('s1'), 1)
+  assert.equal(h.auto.counts().get('s1')?.['max-tokens'], 1)
 
   h.auto.observe(h.session, h.end({ kind: 'completed' }))
   assert.equal(h.auto.counts().has('s1'), false)
@@ -498,7 +553,7 @@ await check('一轮正常结束会把计数清零', async () => {
 })
 
 await check('计数是按会话分开的', async () => {
-  const h = makeHarness({ settings: settingsOf({ autoContinueLimit: 1 }) })
+  const h = makeHarness({ settings: settingsOf({ autoContinueMaxTokensLimit: 1 }) })
   const other = { id: 's2' }
   const otherSent = []
   // 必须是**同一个**对象 —— #deliver 会拿 agents.get() 的结果和手里的 agent 比对。
@@ -663,13 +718,15 @@ await check('没有便签收集器时不该炸（宿主可以不给）', async (
 
 process.stdout.write('autocontinue: 设置归一\n')
 
-await check('默认值：开、两种触发都开、上限 3、失败后先等 5 秒', () => {
+await check('默认值：开、两种触发都开、失败补 1 次、撞上限补 10 次、失败后先等 5 秒', () => {
   const s = normalizeSettings({})
   assert.equal(s.autoContinue, true)
   assert.equal(s.autoContinueOnFailure, true)
   assert.equal(s.autoContinueOnMaxTokens, true)
-  assert.equal(s.autoContinueLimit, DEFAULT_SETTINGS.autoContinueLimit)
-  assert.equal(s.autoContinueLimit, 3)
+  assert.equal(s.autoContinueFailureLimit, DEFAULT_SETTINGS.autoContinueFailureLimit)
+  assert.equal(s.autoContinueFailureLimit, 1, '失败再问一遍多半还是同一个结局，默认只补一次')
+  assert.equal(s.autoContinueMaxTokensLimit, DEFAULT_SETTINGS.autoContinueMaxTokensLimit)
+  assert.equal(s.autoContinueMaxTokensLimit, 10, '撞上限只是没写完，可以多给几次')
   assert.equal(s.continueDelaySec, DEFAULT_SETTINGS.continueDelaySec)
   assert.equal(s.continueDelaySec, 5)
 })
@@ -680,19 +737,34 @@ await check('关掉用 false 表达；"false" 这种字符串也算关（与既�
   assert.equal(normalizeSettings({ autoContinueOnMaxTokens: false }).autoContinueOnMaxTokens, false)
 })
 
-await check('上限必须是正整数，并夹在 1..20', () => {
-  assert.equal(normalizeSettings({ autoContinueLimit: 7 }).autoContinueLimit, 7)
-  assert.equal(normalizeSettings({ autoContinueLimit: 0 }).autoContinueLimit, 3, '0 非法 → 回默认')
-  assert.equal(normalizeSettings({ autoContinueLimit: -2 }).autoContinueLimit, 3)
-  assert.equal(normalizeSettings({ autoContinueLimit: 2.5 }).autoContinueLimit, 3)
-  assert.equal(normalizeSettings({ autoContinueLimit: 999 }).autoContinueLimit, 20, '夹到硬上限')
-  assert.equal(normalizeSettings({ autoContinueLimit: '4' }).autoContinueLimit, 3, '字符串不认')
+await check('两个上限都必须是正整数，各自夹在 1..20，互不影响', () => {
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 7 }).autoContinueFailureLimit, 7)
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 7 }).autoContinueMaxTokensLimit, 10, '改一个不动另一个')
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 0 }).autoContinueFailureLimit, 1, '0 非法 → 回默认')
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: -2 }).autoContinueFailureLimit, 1)
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 2.5 }).autoContinueFailureLimit, 1)
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 999 }).autoContinueFailureLimit, 20, '夹到硬上限')
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: '4' }).autoContinueFailureLimit, 1, '字符串不认')
+
+  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 15 }).autoContinueMaxTokensLimit, 15)
+  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 0 }).autoContinueMaxTokensLimit, 10)
+  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 999 }).autoContinueMaxTokensLimit, 20)
+  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: '4' }).autoContinueMaxTokensLimit, 10)
+})
+
+await check('旧设置里的 autoContinueLimit 不再被认，两个新键各自回默认', () => {
+  // 老版本写盘的键：留着不删也无妨，但它不该再影响任何一次补发。
+  const s = normalizeSettings({ autoContinueLimit: 9 })
+  assert.equal('autoContinueLimit' in s, false, '归一出参里不该再有这个键')
+  assert.equal(s.autoContinueFailureLimit, 1)
+  assert.equal(s.autoContinueMaxTokensLimit, 10)
 })
 
 await check('上限值能被往返序列化（走一遍 JSON 仍相等）', () => {
-  const s = normalizeSettings({ autoContinueLimit: 5, autoContinue: false })
+  const s = normalizeSettings({ autoContinueFailureLimit: 5, autoContinueMaxTokensLimit: 6, autoContinue: false })
   const back = normalizeSettings(JSON.parse(JSON.stringify(s)))
-  assert.equal(back.autoContinueLimit, 5)
+  assert.equal(back.autoContinueFailureLimit, 5)
+  assert.equal(back.autoContinueMaxTokensLimit, 6)
   assert.equal(back.autoContinue, false)
 })
 
