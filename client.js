@@ -33,6 +33,9 @@ window.__ModuleLoader__.load({
     const API_PREFIX = '/api/dsh-model-failover'
     const ROUTE = 'model-failover'
     const CLIENT_NAME = 'model-failover'
+    /** 模板数量与名字长度的上限，与 lib/constants.js 保持一致。 */
+    const MAX_TEMPLATES = 8
+    const MAX_TEMPLATE_NAME = 24
 
     /** cordis 服务名（不是包名）。`slots` 用来插设置页，`locale` 用来翻译。 */
     const inject = ['slots', 'locale']
@@ -60,6 +63,15 @@ window.__ModuleLoader__.load({
 .mf-badge.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; opacity: 1; }
 .mf-badge.mf-ok { border-color: color-mix(in srgb, #30a46c 55%, transparent); color: #30a46c; opacity: 1; }
 .mf-actions { display: flex; gap: 4px; flex: none; }
+/* 正在编辑的那个模板：左边一条竖线，比整行换底色更不刺眼。 */
+.mf-row-on { background: color-mix(in srgb, currentColor 6%, transparent); box-shadow: inset 2px 0 0 currentColor; }
+/* 红 / 绿两个数字是**今天**的失败与成功次数，用等宽数字免得跳动。 */
+.mf-tally { display: flex; gap: 6px; flex: none; font-variant-numeric: tabular-nums; font-size: 12px; }
+.mf-fail { color: #e5484d; min-width: 1.2em; text-align: right; opacity: .85; }
+.mf-good { color: #30a46c; min-width: 1.2em; text-align: right; opacity: .85; }
+.mf-text { font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; min-width: 0; max-width: 260px; width: 100%; }
+.mf-text:hover:not(:disabled) { border-color: color-mix(in srgb, currentColor 18%, transparent); }
+.mf-text:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); background: color-mix(in srgb, currentColor 5%, transparent); }
 .mf-btn { font: inherit; color: inherit; background: transparent; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 3px 9px; cursor: pointer; }
 .mf-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 10%, transparent); }
 .mf-btn:disabled { opacity: .35; cursor: default; }
@@ -122,7 +134,20 @@ window.__ModuleLoader__.load({
         pickNow: '当前起点',
         quarantineCount: '今日隔离',
         none: '无',
-        queue: '优先级队列',
+        templates: '队列模板',
+        templatesHint:
+          '每个模板在模型选择器里就是一个模型：会话挑中哪个模板，它就用哪条队列。下面正在编辑的是这一次要改的那个。',
+        queueOf: '「{name}」的队列',
+        templateName: '模板名',
+        templateNewName: '新模板',
+        templateCandidates: '队列里 {count} 个模型',
+        templateEdit: '编辑',
+        templateEditing: '正在编辑',
+        templateDelete: '删除这个模板',
+        templateAdd: '新建模板',
+        templateAddHint: '最多 8 个。新建出来是空队列，从下面把模型加进去。',
+        failCountHint: '今天这个模型一共失败了几次（所有会话合计）',
+        goodCountHint: '今天这个模型成功了几次（所有会话合计）',
         queueHint:
           '靠前的优先使用。↑ / ↓ 调整顺序，✕ 移出队列；右栏给每个模型挑它这一轮用的思考强度，档位就是平时直接选它时能选的那几档。',
         effortDefault: '默认档位',
@@ -136,20 +161,6 @@ window.__ModuleLoader__.load({
         addModel: '从已接入的模型里添加…',
         add: '添加',
         noModels: '没有扫到可用的模型。',
-        quarantined: '今日隔离名单',
-        quarantinedHint: '这些模型今天不再被用来起头。隔离按会话算，所以同一个模型可能挂在不同的会话名下；要解除，去会话页「隔离队列」那一栏，那里只解除当前会话的。点左边的箭头看完整报错。',
-        attempts: '尝试次数',
-        expand: '展开报错详情',
-        collapse: '收起报错详情',
-        detailCode: '错误码',
-        detailRoute: '路由',
-        detailAttempts: '尝试次数',
-        detailAt: '判定时间',
-        detailMessage: '报错原文',
-        detailNoMessage: '宿主没有留下报错文本。',
-        detailSession: '所属会话',
-        detailNoSession: '不分会话（压缩上下文、后台任务）',
-        rowSession: '会话 {id}…',
         relay: '模型异常',
         relayHint:
           '开着的时候，队列里的模型会一直在后台自动接力：一个产不出东西就换下一个，直到有人把这一轮做完。',
@@ -197,6 +208,7 @@ window.__ModuleLoader__.load({
         catalogErrors: '{count} 条路由的模型清单读取失败：{detail}',
         dataDir: '数据目录',
         route: '模型选择器里选',
+        routeTemplates: '共 {count} 个模板',
         eventsEmpty: '还没有记录。',
         evGood: '{provider}/{model} 产出内容，标记为可用',
         evQuarantine: '{provider}/{model} 无法输出（{code}），今日隔离',
@@ -222,6 +234,7 @@ window.__ModuleLoader__.load({
         qvUnnamed: '未命名会话',
         qvUnscoped: '后台任务（不挂在任何会话下）',
         qvDay: '当前逻辑日 {day}',
+        qvTemplate: '模板「{name}」',
       },
       en: {
         nav: 'Model Relay',
@@ -234,7 +247,20 @@ window.__ModuleLoader__.load({
         pickNow: 'Starts at',
         quarantineCount: 'Quarantined',
         none: 'none',
-        queue: 'Priority queue',
+        templates: 'Queue templates',
+        templatesHint:
+          'Each template is a model in the model chooser: a conversation that picks a template uses that queue. The one being edited right now is the one below.',
+        queueOf: 'Queue for “{name}”',
+        templateName: 'Template name',
+        templateNewName: 'New template',
+        templateCandidates: '{count} model(s) queued',
+        templateEdit: 'Edit',
+        templateEditing: 'Editing',
+        templateDelete: 'Delete this template',
+        templateAdd: 'New template',
+        templateAddHint: 'Up to 8. A new one starts empty — add models below.',
+        failCountHint: 'How many times this model failed today (all conversations)',
+        goodCountHint: 'How many times this model succeeded today (all conversations)',
         queueHint:
           'Earlier entries are tried first. Use ↑ / ↓ to reorder, ✕ to remove; the right column picks the reasoning effort each model uses — the same levels you get when you pick that model directly.',
         effortDefault: 'Default effort',
@@ -248,20 +274,6 @@ window.__ModuleLoader__.load({
         addModel: 'Add a connected model…',
         add: 'Add',
         noModels: 'No models were discovered.',
-        quarantined: 'Quarantined today',
-        quarantinedHint: 'These models will not start a task today. Quarantine is per conversation, so the same model can appear under several conversations; to clear one, use the Quarantine queue tab on the conversation page — it only clears the conversation you are in. Use the arrow at left to see the full error.',
-        attempts: 'attempts',
-        expand: 'Show the full error',
-        collapse: 'Hide the error',
-        detailCode: 'Code',
-        detailRoute: 'Route',
-        detailAttempts: 'Attempts',
-        detailAt: 'Recorded',
-        detailMessage: 'Raw error',
-        detailNoMessage: 'The host recorded no error text.',
-        detailSession: 'Conversation',
-        detailNoSession: 'Not tied to a conversation (compaction, background work)',
-        rowSession: 'Conversation {id}…',
         relay: 'Model anomalies',
         relayHint:
           'While this is on, the queued models keep relaying in the background: one produces nothing and the next takes over, until someone finishes the turn.',
@@ -309,6 +321,7 @@ window.__ModuleLoader__.load({
         catalogErrors: '{count} provider(s) failed to list models: {detail}',
         dataDir: 'Data directory',
         route: 'Pick in the model chooser',
+        routeTemplates: '{count} template(s)',
         eventsEmpty: 'Nothing recorded yet.',
         evGood: '{provider}/{model} produced output — marked usable',
         evQuarantine: '{provider}/{model} produced nothing ({code}) — quarantined today',
@@ -334,6 +347,7 @@ window.__ModuleLoader__.load({
         qvUnnamed: 'Untitled conversation',
         qvUnscoped: 'Background work (not tied to a conversation)',
         qvDay: 'Logical day {day}',
+        qvTemplate: 'template “{name}”',
       },
     }
 
@@ -466,65 +480,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * 隔离名单里的一行：默认只给一行摘要，点箭头才摊开完整报错。
-     *
-     * 摘要那行故意把正文截到 160 字符 —— 一行放不下，且多数报错的关键词就在开头。
-     * 摊开时给的是宿主存下来的**原文**（`health.js` 落盘时截到 400 字符），不再
-     * 二次截断：点开就是为了看被截掉的那半句，再截一次等于没点。
-     *
-     * 展开状态放在行自己身上，所以「哪几行摊开着」是每个渲染器各自的事，宿主和
-     * 设置页都不需要记住它。
-     */
-    function QuarantineRow({ row, t, now }) {
-      const [open, setOpen] = useState(false)
-      const at = row.at ?? now
-      const message = String(row.message ?? '')
-      const detail = [
-        { key: 'detailCode', value: [codeText(row.code), row.code].filter((part) => part !== '').join('  ') },
-        { key: 'detailRoute', value: `${row.provider ?? '?'} / ${row.model ?? '?'}` },
-        { key: 'detailAttempts', value: String(row.attempts ?? 1) },
-        { key: 'detailAt', value: stamp(at) },
-        // 隔离按会话算，所以「这是哪个会话撞的」是这个名单里最关键的一条信息：
-        // 同一张表里同一个模型可能出现好几次，各挂在不同会话名下。
-        { key: 'detailSession', value: row.sessionId === undefined || row.sessionId === '' ? t('detailNoSession') : row.sessionId },
-      ].filter((item) => item.value !== '')
-      return div({ className: 'mf-qrow' },
-        div({ className: 'mf-row' },
-          h('button', {
-            type: 'button',
-            className: 'mf-btn mf-icon',
-            'aria-expanded': open ? 'true' : 'false',
-            title: t(open ? 'collapse' : 'expand'),
-            onClick: () => setOpen((value) => !value),
-          }, open ? '▾' : '▸'),
-          div({ className: 'mf-main' },
-            div({ className: 'mf-name' }, row.label ?? `${row.provider} / ${row.model}`),
-            div({ className: 'mf-sub' },
-              [codeText(row.code), row.code, message.slice(0, 160), `${row.attempts ?? 1} ${t('attempts')}`]
-                .filter((part) => part !== '' && part !== undefined)
-                .join(' · '),
-            ),
-            row.sessionId === undefined || row.sessionId === ''
-              ? null
-              : div({ className: 'mf-sub' }, t('rowSession', { id: row.sessionId.slice(0, 8) })),
-          ),
-          span({ className: 'mf-badge mf-bad' }, stamp(at)),
-        ),
-        open
-          ? div({ className: 'mf-detail' },
-              ...detail.map((item) => div({ className: 'mf-detail-row', key: item.key },
-                span({ className: 'mf-detail-label' }, t(item.key)),
-                span({ className: 'mf-detail-text' }, item.value),
-              )),
-              div({ className: 'mf-detail-row', key: 'detailMessage' },
-                span({ className: 'mf-detail-label' }, t('detailMessage')),
-                span({ className: 'mf-detail-text' }, message === '' ? t('detailNoMessage') : message),
-              ),
-            )
-          : null,
-      )
-    }
 
     // ── 设置页 ──────────────────────────────────────────────────────────────
     /**
@@ -580,26 +535,29 @@ window.__ModuleLoader__.load({
       }, [t])
 
       const settings = state?.settings
-      const order = useMemo(() => (Array.isArray(settings?.order) ? settings.order : []), [settings])
+      /**
+       * 队列模板。模板 id 就是模型 id：会话在 DSH 的模型选择器里挑中哪个模板，
+       * 它就用哪个模板的队列。设置页一次只编辑其中一个。
+       */
+      const templates = useMemo(() => (Array.isArray(settings?.templates) ? settings.templates : []), [settings])
+      const editedTemplate = useMemo(
+        () => templates.find((template) => template.id === settings?.editedTemplate) ?? templates[0],
+        [templates, settings],
+      )
+      const order = useMemo(
+        () => (Array.isArray(editedTemplate?.order) ? editedTemplate.order : []),
+        [editedTemplate],
+      )
+      /** 每模型当天的失败/成功次数（全机器合计），队列前面那对红绿数字。 */
+      const countsOf = useCallback((key) => (state?.counts ?? {})[key] ?? undefined, [state])
 
       /**
-       * 名单卡片用的行：一行一个「模型 + 会话」。
+       * 今日隔离（跨会话、跨模板）的条数。
        *
-       * 隔离是按会话算的，同一个模型可能在三个会话里各撞过一次 —— 只按模型
-       * 去重的话，页面只会显示其中一条（还是排序上最后的那个），另外两个会话
-       * 撞的墙就看不见了。
+       * 设置页不再列名单了 —— 隔离是按「会话 × 模板」算的，一页表格说不清
+       * 「在我这个会话里能不能用」。要看细节去会话页那一栏。
        */
-      const quarantineRows = useMemo(() => {
-        const seen = new Set()
-        const rows = []
-        for (const row of state?.quarantined ?? []) {
-          const id = `${row.key}\u0000${row.sessionId ?? ''}`
-          if (seen.has(id)) continue
-          seen.add(id)
-          rows.push({ ...row, id })
-        }
-        return rows
-      }, [state])
+      const quarantineCount = (state?.quarantined ?? []).length
 
       /**
        * 今天被隔离过的模型（任意会话）。
@@ -627,7 +585,16 @@ window.__ModuleLoader__.load({
         return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name))
       }, [state, order])
 
-      const mutateOrder = useCallback((next) => { void run('/settings', { order: next }) }, [run])
+      const mutateOrder = useCallback((nextOrder) => {
+        if (editedTemplate === undefined) return
+        // 整个数组一起写回去：模板是设置里唯一需要「同时改名字和队列」的地方，
+        // 逐键补丁会把两次修改拆成两个请求，中间那一瞬的名字可能是旧的。
+        void run('/settings', {
+          templates: templates.map((template) => (
+            template.id === editedTemplate.id ? { ...template, order: nextOrder } : template
+          )),
+        })
+      }, [editedTemplate, templates, run])
 
       const move = useCallback((index, delta) => {
         const target = index + delta
@@ -665,6 +632,41 @@ window.__ModuleLoader__.load({
         setAddKey('')
         mutateOrder([...order, { provider, model }])
       }, [addKey, order, mutateOrder])
+
+      /** 切到另一个模板编辑。只是界面状态，不影响任何会话实际用哪条队列。 */
+      const selectTemplate = useCallback((id) => {
+        if (id === settings?.editedTemplate) return
+        void run('/settings', { editedTemplate: id })
+      }, [settings, run])
+
+      const renameTemplate = useCallback((id, name) => {
+        const trimmed = String(name ?? '').trim().slice(0, MAX_TEMPLATE_NAME)
+        const hit = templates.find((template) => template.id === id)
+        if (hit === undefined || trimmed === '' || trimmed === hit.name) return
+        void run('/settings', {
+          templates: templates.map((template) => (template.id === id ? { ...template, name: trimmed } : template)),
+        })
+      }, [templates, run])
+
+      /**
+       * 新建一个空队列模板。
+       *
+       * id 在浏览器这边生成、宿主只校验字符集与唯一性：用时间戳后缀是为了
+       * 同一个页面连点两次也能拿到两个不同的 id。
+       */
+      const createTemplate = useCallback(() => {
+        if (templates.length >= MAX_TEMPLATES) return
+        const id = `t${Date.now().toString(36)}`
+        const name = `${t('templateNewName')} ${templates.length + 1}`
+        void run('/settings', { templates: [...templates, { id, name, order: [] }], editedTemplate: id })
+      }, [templates, run, t])
+
+      /** 删掉一个模板。最后一个不给删：这条路由总得有一条队列兜底。 */
+      const deleteTemplate = useCallback((id) => {
+        if (templates.length <= 1) return
+        const next = templates.filter((template) => template.id !== id)
+        void run('/settings', { templates: next, editedTemplate: next[0].id })
+      }, [templates, run])
 
       /** 队列里第一个没被隔离的模型 —— 也就是下一个任务会从谁起头。 */
       const startAt = useMemo(() => {
@@ -760,9 +762,8 @@ window.__ModuleLoader__.load({
             ),
             div({ className: 'mf-kv' },
               span({ className: 'mf-note' }, t('quarantineCount')),
-              // 按「模型 + 会话」数：隔离是按会话算的，同一个模型在两个会话里
-              // 各撞一次，这里就是 2 —— 跟下面那张名单的行数对得上。
-              h('b', null, String(quarantineRows.length)),
+              // 跨会话、跨模板合计：设置页只报个数，明细在会话页那一栏。
+              h('b', null, String(quarantineCount)),
             ),
           ),
           notice !== '' && error === '' ? div({ className: 'mf-note' }, notice) : null,
@@ -791,14 +792,50 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
+        // ── 队列模板 ────────────────────────────────────────────────────────
+        // 每个模板在这条路由下就是一个「模型」：会话在模型选择器里挑中哪个
+        // 模板，它就用哪条队列。设置页一次只编辑其中一个。
+        Card({ title: t('templates') },
+          div({ className: 'mf-note' }, t('templatesHint')),
+          ...templates.map((template) => h(TemplateRow, {
+            key: template.id,
+            template,
+            edited: template.id === editedTemplate?.id,
+            busy,
+            t,
+            canDelete: templates.length > 1,
+            onSelect: () => selectTemplate(template.id),
+            onRename: (name) => renameTemplate(template.id, name),
+            onDelete: () => deleteTemplate(template.id),
+          })),
+          div({ className: 'mf-add' },
+            h('button', {
+              type: 'button',
+              className: 'mf-btn',
+              'data-role': 'template-add',
+              disabled: busy || templates.length >= MAX_TEMPLATES,
+              onClick: createTemplate,
+            }, t('templateAdd')),
+            span({ className: 'mf-note' }, t('templateAddHint')),
+          ),
+        ),
+
         // ── 优先级队列 ──────────────────────────────────────────────────────
-        Card({ title: t('queue') },
+        Card({ title: t('queueOf', { name: editedTemplate?.name ?? '' }) },
           div({ className: 'mf-note' }, t('queueHint')),
           ...order.map((item, index) => {
               const key = keyOf(item.provider, item.model)
               const hit = (state.catalog ?? []).find((row) => row.provider === item.provider && row.model === item.model)
+              const tally = countsOf(key)
               return div({ className: 'mf-row', key },
                 span({ className: 'mf-idx' }, String(index + 1)),
+                // 今天这个模型在全机器上失败了几次、成了几次。红的是失败、绿的是
+                // 成功 —— 它是**统计**，不是隔离状态：隔离按「会话 × 模板」算，
+                // 一行一个模型答不了「在我这个会话里能不能用」。
+                span({ className: 'mf-tally' },
+                  span({ className: 'mf-fail', title: t('failCountHint') }, String(tally?.fail ?? 0)),
+                  span({ className: 'mf-good', title: t('goodCountHint') }, String(tally?.ok ?? 0)),
+                ),
                 div({ className: 'mf-main' },
                   div({ className: 'mf-name' }, hit?.name ?? item.model),
                   div({ className: 'mf-sub' }, `${hit?.providerName ?? item.provider} · ${item.model}`),
@@ -826,7 +863,7 @@ window.__ModuleLoader__.load({
                 div({ className: 'mf-actions' },
                   h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveUp'), disabled: busy || index === 0, onClick: () => move(index, -1) }, '↑'),
                   h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveDown'), disabled: busy || index === order.length - 1, onClick: () => move(index, 1) }, '↓'),
-                  h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('remove'), disabled: busy, onClick: () => removeAt(index) }, '✕'),
+                  h('button', { type: 'button', className: 'mf-btn mf-icon', 'data-role': 'queue-remove', title: t('remove'), disabled: busy, onClick: () => removeAt(index) }, '✕'),
                 ),
               )
             }),
@@ -847,18 +884,9 @@ window.__ModuleLoader__.load({
             ),
         ),
 
-        // ── 今日隔离名单 ────────────────────────────────────────────────────
-        quarantineRows.length > 0
-          ? Card({ title: `${t('quarantined')} (${quarantineRows.length})` },
-              div({ className: 'mf-note' }, t('quarantinedHint')),
-              ...quarantineRows.map((row) => h(QuarantineRow, {
-                key: row.id,
-                row,
-                t,
-                now,
-              })),
-            )
-          : null,
+        // 这里原来有一张「今日隔离名单」卡片，已经删掉：隔离是按「会话 × 模板」
+        // 算的，一页全局表格既说不清是谁撞的墙，也容易让人以为解除了就全局生效。
+        // 明细改在会话页顶部的「隔离队列」一栏，那里能就地解除当前会话。
 
         // ── 模型异常 ────────────────────────────────────────────────────────
         Card({ title: t('relay') },
@@ -985,7 +1013,7 @@ window.__ModuleLoader__.load({
             span({ className: 'mf-note' }, t('count')),
           ),
           div({ className: 'mf-note' }, `${t('dataDir')}：${state.dataDir ?? '?'}`),
-          div({ className: 'mf-note' }, `${t('route')}：${state.route?.label ?? ROUTE} / ${state.route?.model ?? 'auto'}`),
+          div({ className: 'mf-note' }, `${t('route')}：${state.route?.label ?? ROUTE} · ${t('routeTemplates', { count: templates.length })}`),
         ),
       )
     }
@@ -1018,6 +1046,58 @@ window.__ModuleLoader__.load({
         onBlur: commit,
         onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
       })
+    }
+
+    /**
+     * 模板列表里的一行：改名、切成正在编辑、删掉。
+     *
+     * 名字用「失焦/回车才提交」的输入框，而不是每敲一个字就发一次请求 ——
+     * 一个名字要打十几次键盘，那样就是十几次往返，而且每次都会把正在编辑的
+     * 模板重置一遍。
+     */
+    function TemplateRow({ template, edited, busy, t, canDelete, onSelect, onRename, onDelete }) {
+      const [draft, setDraft] = useState(template.name)
+      useEffect(() => { setDraft(template.name) }, [template.name])
+      const commit = () => {
+        const trimmed = draft.trim().slice(0, MAX_TEMPLATE_NAME)
+        if (trimmed === '') { setDraft(template.name); return }
+        setDraft(trimmed)
+        onRename(trimmed)
+      }
+      return div({ className: edited ? 'mf-row mf-row-on' : 'mf-row' },
+        div({ className: 'mf-main' },
+          h('input', {
+            className: 'mf-text',
+            type: 'text',
+            value: draft,
+            maxLength: MAX_TEMPLATE_NAME,
+            disabled: busy,
+            'data-name': 'templateName',
+            'aria-label': t('templateName'),
+            onChange: (event) => setDraft(event.target.value),
+            onBlur: commit,
+            onKeyDown: (event) => { if (event.key === 'Enter') event.currentTarget.blur() },
+          }),
+          div({ className: 'mf-sub' }, `${template.id} · ${t('templateCandidates', { count: template.order.length })}`),
+        ),
+        div({ className: 'mf-actions' },
+          h('button', {
+            type: 'button',
+            className: 'mf-btn',
+            'data-role': 'template-select',
+            disabled: busy || edited,
+            onClick: onSelect,
+          }, edited ? t('templateEditing') : t('templateEdit')),
+          h('button', {
+            type: 'button',
+            className: 'mf-btn mf-icon',
+            'data-role': 'template-delete',
+            title: t('templateDelete'),
+            disabled: busy || !canDelete,
+            onClick: onDelete,
+          }, '✕'),
+        ),
+      )
     }
 
     // ── 轮尾小字：接力插过手的那一轮，是谁在跑 ──────────────────────────────
@@ -1140,10 +1220,13 @@ window.__ModuleLoader__.load({
      * 拿不到时退回会话号前缀 —— 这一栏是给人看「哪个会话出事了」，标题只是
      * 帮助识别，缺了也不能空白。
      */
-    function SessionQueueRow({ row, mine, title, t }) {
+    function SessionQueueRow({ row, mine, title, t, templateName }) {
       const quarantined = row?.quarantined ?? []
       const good = row?.good ?? []
       const active = row?.active
+      const activeTemplate = typeof active?.templateName === 'string' && active.templateName !== ''
+        ? active.templateName
+        : undefined
       return div({ className: mine ? 'mf-qv-session mf-mine' : 'mf-qv-session' },
         div({ className: 'mf-qv-top' },
           span({ className: 'mf-qv-title' }, title === undefined || title === '' ? t('qvUnnamed') : title),
@@ -1152,7 +1235,11 @@ window.__ModuleLoader__.load({
         ),
         div({ className: 'mf-qv-line' },
           span({ className: 'mf-qv-label' }, t('qvActive')),
-          span({ className: 'mf-qv-value' }, active === undefined ? t('none') : sessionItemLabel(active)),
+          // 模板名跟着模型一起报：同一个模型可能同时挂在好几条模板的队列里，
+          // 只说模型名答不了「这个会话现在跑的是哪条队列」。
+          span({ className: 'mf-qv-value' }, active === undefined
+            ? t('none')
+            : `${sessionItemLabel(active)}${activeTemplate === undefined ? '' : ` · ${t('qvTemplate', { name: activeTemplate })}`}`),
         ),
         div({ className: 'mf-qv-line' },
           span({ className: 'mf-qv-label' }, t('qvQuarantined')),
@@ -1161,10 +1248,15 @@ window.__ModuleLoader__.load({
             : div({ className: 'mf-qv-list' },
                 ...quarantined.map((item) => h('span', {
                   className: 'mf-qv-item mf-bad',
-                  key: item.key,
+                  key: `${item.key ?? ''}\u0000${item.templateId ?? ''}`,
                   title: String(item.message ?? ''),
                 },
                   span(null, sessionItemLabel(item)),
+                  // 别的模板撞的墙不算这个会话当前的麻烦，但也不能凭空消失：
+                  // 补一句模板名，说明它是哪条队列上的账。
+                  item.templateId === undefined || item.templateId === active?.templateId
+                    ? null
+                    : span({ className: 'mf-qv-code' }, ` · ${templateName(item.templateId)}`),
                   span({ className: 'mf-qv-code' }, ` · ${codeText(item.code) || String(item.code ?? '?')} · ${stamp(item.at)}`),
                 )),
               ),
@@ -1174,7 +1266,10 @@ window.__ModuleLoader__.load({
           : div({ className: 'mf-qv-line' },
               span({ className: 'mf-qv-label' }, t('qvQueued')),
               div({ className: 'mf-qv-list' },
-                ...good.map((item) => h('span', { className: 'mf-qv-item mf-ok', key: item.key }, sessionItemLabel(item))),
+                ...good.map((item) => h('span', {
+                  className: 'mf-qv-item mf-ok',
+                  key: `${item.key ?? ''}\u0000${item.templateId ?? ''}`,
+                }, sessionItemLabel(item))),
               ),
             ),
       )
@@ -1230,7 +1325,30 @@ window.__ModuleLoader__.load({
         }
       }, [load])
 
-      const rows = Array.isArray(data?.sessions) ? data.sessions : []
+      /**
+       * 当前会话排在第一行，其余保持宿主给的顺序（隔离着的 → 正在跑的 → 其余）。
+       *
+       * 只把「我这一栏」拎到最上面，别的相对位置一个都不动：那一份顺序是宿主按
+       * 紧急程度排的，前端再排一次就等于两处各自维护一套规则。
+       *
+       * 没有会话号时按钮一律灰着：说不清「当前会话」是谁的时候，按下去要么
+       * 什么都不做，要么（更糟）落到「不分会话」那一桶里替后台任务解开。
+       */
+      const scoped = typeof mineId === 'string' && mineId !== ''
+      const rows = useMemo(() => {
+        const all = Array.isArray(data?.sessions) ? data.sessions : []
+        if (!scoped) return all
+        const index = all.findIndex((row) => row.sessionId === mineId)
+        if (index <= 0) return all
+        return [all[index], ...all.slice(0, index), ...all.slice(index + 1)]
+      }, [data, mineId, scoped])
+
+      /** 模板 id → 名字。隔离条目上只带 id，名字得从宿主给的模板表里换。 */
+      const templateName = useCallback((id) => {
+        const hit = (Array.isArray(data?.templates) ? data.templates : []).find((template) => template.id === id)
+        return typeof hit?.name === 'string' && hit.name !== '' ? hit.name : String(id ?? '?')
+      }, [data])
+
       const titleOf = (sessionId) => {
         // 空串是「不分会话」那一桶：压缩上下文、后台任务、离线测试都落在那里。
         // 它不是某个会话，套一个「未命名会话」会让人以为有这么个对话。
@@ -1245,11 +1363,7 @@ window.__ModuleLoader__.load({
        *
        * 解除按钮只在真有东西可解时点得动 —— 一个从头到尾都正常的会话摆着一个
        * 能按的按钮，按下去什么也不会发生，比按钮灰着更让人困惑。
-       *
-       * 没有会话号时按钮一律灰着：说不清「当前会话」是谁的时候，按下去要么
-       * 什么都不做，要么（更糟）落到「不分会话」那一桶里替后台任务解开。
        */
-      const scoped = typeof mineId === 'string' && mineId !== ''
       const mineRow = scoped ? rows.find((row) => row.sessionId === mineId) : undefined
       const mineCount = Array.isArray(mineRow?.quarantined) ? mineRow.quarantined.length : 0
 
@@ -1308,6 +1422,7 @@ window.__ModuleLoader__.load({
                 mine: row.sessionId === mineId,
                 title: titleOf(row.sessionId),
                 t,
+                templateName,
               })),
       )
     }

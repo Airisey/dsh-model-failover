@@ -284,20 +284,30 @@ const at = Date.now()
 const TAIL_MARK = '『尾部标记·只有展开才看得见』'
 const LONG_ERROR = `workbuddy: {"error":"cannot resolve tunnel destination www.workbuddy.ai (ENOTFOUND): local name resolution failed — the local resolver may be unreachable or taken over by another DNS service (VPN/MagicDNS); route egress through an upstream proxy to have the destination resolved remotely","code":"tunnel_destination_denied","detail":"unresolvable"} ${TAIL_MARK}`
 
+const payloadResponse = (payload) => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) })
+
 const initialState = () => ({
   ok: true,
-  route: { provider: 'model-failover', model: 'auto', label: '模型接力' },
+  route: { provider: 'model-failover', label: '模型接力' },
   now: at,
   day: '2026-11-27',
   nextResetAt: at + 3 * 3600_000,
   settings: {
     enabled: true,
     bootstrapped: true,
-    order: [
-      { provider: 'alpha', model: 'one' },
-      { provider: 'beta', model: 'one' },
-      { provider: 'gamma', model: 'two' },
+    templates: [
+      {
+        id: 'default',
+        name: '默认模板',
+        order: [
+          { provider: 'alpha', model: 'one' },
+          { provider: 'beta', model: 'one' },
+          { provider: 'gamma', model: 'two' },
+        ],
+      },
+      { id: 'spare', name: '备用模板', order: [] },
     ],
+    editedTemplate: 'default',
     resetHour: 1,
     retrySameModelOnce: true,
     continueText: '继续',
@@ -335,6 +345,12 @@ const initialState = () => ({
     { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'TRANSPORT', message: LONG_ERROR, at: at - 60_000, label: 'FutureHub · Gamma Two', sessionId: 'sess-long-name' },
   ],
   good: [{ key: KEY('alpha', 'one'), at, provider: 'alpha', model: 'one', label: '硅基流动 · Alpha One' }],
+  // 红绿数字：全机器合计，跨会话跨模板都算在同一个模型头上。
+  counts: {
+    [KEY('alpha', 'one')]: { fail: 0, ok: 7 },
+    [KEY('beta', 'one')]: { fail: 3, ok: 1 },
+    [KEY('gamma', 'two')]: { fail: 12, ok: 0 },
+  },
   events: [
     { at: at - 60_000, kind: 'quarantine', provider: 'beta', model: 'one', code: 'QUOTA' },
     { at: at - 120_000, kind: 'good', provider: 'alpha', model: 'one' },
@@ -611,7 +627,9 @@ const sessionsPayload = (sessions, day = '2026-11-27') => ({
     ok: true,
     now: at,
     day,
-    route: { provider: 'model-failover', model: 'auto', label: '模型接力' },
+    route: { provider: 'model-failover', label: '模型接力' },
+    // 隔离条目上只带模板 id，名字得从这里换。
+    templates: [{ id: 'default', name: '默认模板' }, { id: 'spare', name: '备用模板' }],
     sessions,
   }),
 })
@@ -620,7 +638,7 @@ const sessionRow = (overrides) => ({
   sessionId: 's-alpha',
   quarantined: [],
   good: [],
-  active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' },
+  active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One', templateId: 'default', templateName: '默认模板' },
   ...overrides,
 })
 
@@ -677,6 +695,47 @@ await check('隔离队列：问的是轻量 /sessions，按会话列出「正在
   // 第二个会话：没有隔离，只显示一句「没有出过问题」。
   assert.ok(flat.includes('FutureHub · Gamma Two'), '第二个会话有它自己的当前模型')
   assert.ok(flat.includes('今天没有出过问题的模型'), '没有隔离时说清楚')
+})
+
+await check('隔离队列：当前会话那一行排到最前面，其余会话顺序不变', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-a' }),
+    sessionRow({ sessionId: 's-b' }),
+    sessionRow({ sessionId: 's-mine' }),
+  ])
+  let cards
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    cards = fresh.nodes.filter((node) => String(node.props?.className ?? '').startsWith('mf-qv-session'))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(cards.length, 3, '三个会话各一张卡')
+  assert.equal(cards[0].props.className, 'mf-qv-session mf-mine', '自己那个会话置顶')
+  assert.deepEqual(
+    cards.slice(1).map((node) => node.props.className),
+    ['mf-qv-session', 'mf-qv-session'],
+    '别的会话保持宿主给的顺序',
+  )
+})
+
+await check('隔离队列：每个会话那行写明它在用哪个模板', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine', active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One', templateId: 'spare', templateName: '备用模板' } }),
+    sessionRow({ sessionId: 's-other' }),
+  ])
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('备用模板'), '当前会话用的是备用模板，要写出来')
+  assert.ok(flat.includes('默认模板'), '另一个会话仍写它的模板名')
 })
 
 await check('隔离队列：当前会话那一行有标记，别的会话没有', async () => {
@@ -905,13 +964,17 @@ globalThis.fetch = async (url, init = {}) => {
   requests.push({ url: String(url), method, body })
   if (method === 'POST') {
     if (String(url).endsWith('/settings') && body !== undefined) {
-      if (Array.isArray(body.order)) {
-        // 模拟宿主 normalizeSettings：只留 provider/model/reasoningEffort，
-        // 没设档位的项不补空字段。
-        current.settings.order = body.order.map((item) => (item.reasoningEffort === undefined
-          ? { provider: item.provider, model: item.model }
-          : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort }))
+      if (Array.isArray(body.templates)) {
+        // 模拟宿主 normalizeTemplates：只留 id/name/order，档位只保留真正设了的。
+        current.settings.templates = body.templates.map((template) => ({
+          id: template.id,
+          name: template.name,
+          order: (template.order ?? []).map((item) => (item.reasoningEffort === undefined
+            ? { provider: item.provider, model: item.model }
+            : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort })),
+        }))
       }
+      if (typeof body.editedTemplate === 'string') current.settings.editedTemplate = body.editedTemplate
       for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
@@ -955,137 +1018,27 @@ await check('队列行上不再画隔离/可用徽标：那是按会话算的，
   )
 })
 
-// ── 隔离名单：展开看完整报错 ────────────────────────────────────────────────
+// ── 隔离名单已经撤掉 ────────────────────────────────────────────────────────
+//
+// 设置页不再有「今日隔离名单」那张卡：隔离按「会话 × 模板」算，一页全局表格
+// 既说不清是谁撞的墙，也容易被当成「解除了就处处生效」。明细在这里只剩会话页
+// 的「隔离队列」一栏，本轮用例也搬去了那边。
 
-/** 隔离名单里那几行的展开按钮（名单之外的按钮不带 aria-expanded）。 */
-const expanders = (rt = runtime) => rt.nodes.filter(
-  (node) => node.tag === 'button' && node.props['aria-expanded'] !== undefined,
-)
-
-await check('隔离名单每行都有一个展开箭头，默认是收起的', () => {
-  const buttons = expanders()
-  assert.equal(buttons.length, 2, '隔离了几个模型就有几个箭头')
-  assert.ok(buttons.every((node) => node.props['aria-expanded'] === 'false'), '默认都收起')
-  assert.equal(buttons[0].text, '▸')
-  assert.equal(buttons[0].props.title, 'expand', '收起时提示「展开」')
-  assert.equal(runtime.nodes.filter((node) => node.props.className === 'mf-detail').length, 0, '收起时不该有详情块')
-})
-
-await check('摘要行只给截断后的报错，尾部标记先藏着', () => {
-  const subs = runtime.nodes.filter((node) => node.props.className === 'mf-sub' && String(node.text).includes('tunnel'))
-  assert.equal(subs.length, 1, '两条隔离里只有 gamma 那条带着长报错')
-  assert.ok(subs[0].text.includes('cannot resolve tunnel destination'), '摘要里应保留报错开头')
-  assert.ok(!subs[0].text.includes(TAIL_MARK), '摘要行该把 160 字符之后的内容截掉')
-  const flat = runtime.text(tree)
-  assert.ok(!flat.includes(TAIL_MARK), '收起状态下整棵树里都不该出现尾部标记')
-})
-
-await check('点开箭头：摊出错误码、路由、尝试次数、判定时间和完整报错原文', async () => {
-  await expanders()[1].props.onClick()
-  await runtime.mount(page(props))
-
-  const buttons = expanders()
-  assert.equal(buttons[1].props['aria-expanded'], 'true', '点过的那一行变成展开')
-  assert.equal(buttons[1].text, '▾')
-  assert.equal(buttons[1].props.title, 'collapse', '展开后提示变成「收起」')
-  assert.equal(buttons[0].props['aria-expanded'], 'false', '别的行不受影响 —— 展开状态是按行各记一份')
-
-  const details = runtime.nodes.filter((node) => node.props.className === 'mf-detail')
-  assert.equal(details.length, 1, '只摊开了一行')
-  const rows = Object.fromEntries(
-    runtime.nodes
-      .filter((node) => node.props.className === 'mf-detail-row')
-      .map((node) => [node.props.key, node.text]),
-  )
-  assert.equal(rows.detailCode, 'detailCode网络中断  TRANSPORT', '错误码既给人话也留原始值')
-  assert.equal(rows.detailRoute, 'detailRoutegamma / two')
-  assert.equal(rows.detailAttempts, 'detailAttempts1')
-  assert.match(rows.detailAt, /^detailAt\d\d-\d\d \d\d:\d\d$/, '判定时间跟一个 MM-DD HH:MM 时间戳')
-  // 同一张名单里同一个模型可能挂在若干个会话名下，所以「是哪个会话撞的」必须写得出来。
-  assert.equal(rows.detailSession, 'detailSessionsess-long-name', '要点名隔离挂在哪个会话名下')
-  assert.ok(rows.detailMessage.includes(TAIL_MARK), '展开就是为了看被截掉的那半句')
-  assert.ok(rows.detailMessage.startsWith('detailMessage'), '带一行「报错原文」的标签')
-  // 收起时摘要行也给一句会话提示：一行行摊开看才知道是谁撞的，太费事。
-  // 这一页的 t() 是回声版（只回 key），所以这里认的是 key 而不是译文；插值另外验。
-  const summaries = runtime.nodes.filter((node) => node.props.className === 'mf-sub')
-  assert.ok(summaries.some((node) => node.text === 'rowSession'), '摘要行要带一段会话提示')
-})
-
-await check('设置页的隔离摘要用真字典渲染时，会话号前缀真的插进去了', async () => {
-  const fresh = new Runtime()
+await check('设置页不再有「今日隔离名单」卡片，那件事只剩会话页那一栏', async () => {
+  const real = new Runtime()
   const saved = globalThis.fetch
-  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(initialState()) })
+  globalThis.fetch = async () => payloadResponse(initialState())
+  let flat
   try {
-    const tree = await fresh.mount(sections[0].component({ close() {}, t }))
-    const flat = fresh.text(tree)
-    assert.ok(flat.includes('会话 sess-lon…'), `摘要行应带会话号前缀，实际：${flat.slice(0, 400)}`)
-    assert.ok(flat.includes('会话 sess-alp…'), '两行挂在不同会话下，各写各的')
+    flat = real.text(await real.mount(page({ close() {}, t: (key) => String(dictZh[key] ?? key) })))
   } finally {
     globalThis.fetch = saved
   }
+  assert.equal(flat.includes('今日隔离名单'), false, '名单卡片应当已经撤掉')
+  assert.equal(flat.includes('解除今日隔离'), false, '解除按钮也不该在设置页')
+  assert.ok(flat.includes('今日隔离'), '「今日状态」那一格还在，只是只剩个数')
 })
 
-await check('同一个模型在三个会话里各撞一次：名单出三行，一行一个会话', async () => {
-  const fresh = new Runtime()
-  const saved = globalThis.fetch
-  const many = initialState()
-  many.quarantined = ['sess-one', 'sess-two', 'sess-three'].map((sessionId, index) => ({
-    key: KEY('gamma', 'two'),
-    provider: 'gamma',
-    model: 'two',
-    code: 'TRANSPORT',
-    message: `会话 ${sessionId} 撞的墙`,
-    at: at - (3 - index) * 1000,
-    label: 'FutureHub · Gamma Two',
-    sessionId,
-  }))
-  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(many) })
-  try {
-    await fresh.mount(sections[0].component({ close() {}, t }))
-    const buttons = expanders(fresh)
-    assert.equal(buttons.length, 3, '按「模型 + 会话」去重，三条都要露出来')
-    // 队列行上不再画徽标了（那是按会话算的），但名单卡片必须一条不漏。
-    // 只按模型去重的话这里会是一个 map，键撞在一起，只剩最后一条。
-    const card = fresh.nodes.find((node) => node.props.className === 'mf-title' && node.text.startsWith('今日隔离名单'))
-    assert.ok(card !== undefined, '名单卡片应当出现，且标题里的计数按「模型 + 会话」算')
-    assert.ok(card.text.includes('(3)'), `卡片标题应写 3 条，实际：${card.text}`)
-    const flat = fresh.text(await fresh.mount(sections[0].component({ close() {}, t })))
-    for (const id of ['sess-one', 'sess-two', 'sess-three']) {
-      assert.ok(flat.includes(id.slice(0, 8)), `${id} 应该各占一行`)
-    }
-  } finally {
-    globalThis.fetch = saved
-  }
-})
-
-await check('再点一下箭头就收回去，详情块整个消失', async () => {
-  await expanders()[1].props.onClick()
-  await runtime.mount(page(props))
-  assert.equal(expanders()[1].props['aria-expanded'], 'false')
-  assert.equal(runtime.nodes.filter((node) => node.props.className === 'mf-detail').length, 0)
-  assert.ok(!runtime.text(tree).includes(TAIL_MARK), '收回去之后尾部标记也一起藏好')
-})
-
-await check('宿主没留下报错文本时，展开显示的是「没有留下」而不是空白', async () => {
-  const fresh = new Runtime()
-  const saved = globalThis.fetch
-  const blank = initialState()
-  blank.quarantined = [
-    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'UNKNOWN', message: '', at, label: 'Code99 · Beta One' },
-  ]
-  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(blank) })
-  try {
-    const page2 = sections[0].component
-    await fresh.mount(page2(props))
-    await expanders(fresh)[0].props.onClick()
-    await fresh.mount(page2(props))
-    const rows = fresh.nodes.filter((node) => node.props.className === 'mf-detail-row')
-    assert.ok(rows.some((node) => node.text === 'detailMessagedetailNoMessage'), '空报错要有一句说明')
-    assert.equal(expanders(fresh)[0].props['aria-expanded'], 'true')
-  } finally {
-    globalThis.fetch = saved
-  }
-})
 
 await check('每行按模型自己的档位表画思考强度下拉框：认档位 / 不支持 / 还没问到', () => {
   const selects = runtime.nodes.filter((node) => node.props.className === 'mf-effort')
@@ -1115,12 +1068,19 @@ await check('改档位：POST 整个新顺序，只有这一项带 reasoningEffo
   assert.equal(posts.length, 1, '应只发一个 POST')
   assert.equal(posts[0].url, '/api/dsh-model-failover/settings')
   assert.deepEqual(posts[0].body, {
-    order: [
-      { provider: 'alpha', model: 'one', reasoningEffort: 'high' },
-      { provider: 'beta', model: 'one' },
-      { provider: 'gamma', model: 'two' },
+    templates: [
+      {
+        id: 'default',
+        name: '默认模板',
+        order: [
+          { provider: 'alpha', model: 'one', reasoningEffort: 'high' },
+          { provider: 'beta', model: 'one' },
+          { provider: 'gamma', model: 'two' },
+        ],
+      },
+      { id: 'spare', name: '备用模板', order: [] },
     ],
-  }, '档位只落在被改的那一项上，顺序原样带上')
+  }, '档位只落在被改的那一项上，顺序原样带上；两个模板整份写回去')
 
   const after = runtime.nodes.filter((node) => node.props.className === 'mf-effort' && node.props.disabled !== true)[0]
   assert.equal(after.props.value, 'high', '控件显示宿主确认下来的值')
@@ -1134,7 +1094,7 @@ await check('把档位改回「默认档位」：这一项不再带 reasoningEff
   await runtime.mount(page(props))
 
   const body = requests.slice(before).filter((row) => row.method === 'POST')[0].body
-  assert.equal('reasoningEffort' in body.order[0], false, '「默认档位」= 不发这个字段，用模型平时的档位')
+  assert.equal('reasoningEffort' in body.templates[0].order[0], false, '「默认档位」= 不发这个字段，用模型平时的档位')
 })
 
 await check('↑ 把第二个候选与第一个交换，并 POST 完整的新顺序', async () => {
@@ -1147,23 +1107,33 @@ await check('↑ 把第二个候选与第一个交换，并 POST 完整的新顺
   assert.equal(posts.length, 1, '应只发一个 POST')
   assert.equal(posts[0].url, '/api/dsh-model-failover/settings')
   assert.deepEqual(posts[0].body, {
-    order: [
-      { provider: 'beta', model: 'one' },
-      { provider: 'alpha', model: 'one' },
-      { provider: 'gamma', model: 'two' },
+    templates: [
+      {
+        id: 'default',
+        name: '默认模板',
+        order: [
+          { provider: 'beta', model: 'one' },
+          { provider: 'alpha', model: 'one' },
+          { provider: 'gamma', model: 'two' },
+        ],
+      },
+      { id: 'spare', name: '备用模板', order: [] },
     ],
   })
-  assert.deepEqual(current.settings.order.map((row) => row.provider), ['beta', 'alpha', 'gamma'])
+  assert.deepEqual(current.settings.templates[0].order.map((row) => row.provider), ['beta', 'alpha', 'gamma'])
 })
 
 await check('✕ 把这一行移出队列', async () => {
   const before = requests.length
-  await runtime.enabledButton('✕').props.onClick()
+  // 模板行上也有一个 ✕（删模板），所以按 data-role 认按钮，不能只看字形。
+  const remove = runtime.nodes.find((node) => node.props['data-role'] === 'queue-remove' && node.props.disabled !== true)
+  assert.ok(remove !== undefined, '队列行上应该有可用的移出按钮')
+  await remove.props.onClick()
   await runtime.mount(page(props))
 
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
-  assert.deepEqual(posts[0].body.order.map((row) => row.provider), ['alpha', 'gamma'])
+  assert.deepEqual(posts[0].body.templates[0].order.map((row) => row.provider), ['alpha', 'gamma'])
 })
 
 await check('总开关能关掉，POST 的是布尔值', async () => {
@@ -1453,6 +1423,102 @@ await check('扫描按钮走 /refresh', async () => {
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
   assert.equal(posts[0].url, '/api/dsh-model-failover/refresh')
+})
+
+
+// ── 队列行上的红绿数字 ─────────────────────────────────────────────────────
+
+await check('队列行前显示今日失败/成功次数：宿主没给就写 0，不显示 undefined', () => {
+  const tallies = runtime.nodes.filter((node) => node.props?.className === 'mf-tally')
+  assert.ok(tallies.length > 0, '队列里每行模型都该有一组数字')
+  const texts = tallies.map((node) => [].concat(node.props.children ?? []).map((child) => String(child?.props?.children ?? '')).join('/'))
+  for (const text of texts) {
+    assert.match(text, /^\d+\/\d+$/, `红/绿两个数都要有，实际是 ${text}`)
+    assert.equal(text.includes('undefined'), false, '宿主没给计数时写 0，不是 undefined')
+  }
+  // alpha 今天的账是 0 失败 / 7 成功（见 initialState 的 counts）。
+  assert.ok(texts.includes('0/7'), `alpha 那行应显示 0/7，实际 ${JSON.stringify(texts)}`)
+
+  const fail = runtime.nodes.filter((node) => node.props?.className === 'mf-fail')
+  const good = runtime.nodes.filter((node) => node.props?.className === 'mf-good')
+  assert.equal(fail.length, tallies.length)
+  assert.equal(good.length, tallies.length)
+  assert.equal(fail[0].props.title, 'failCountHint')
+  assert.equal(good[0].props.title, 'goodCountHint')
+})
+
+// ── 队列模板 ────────────────────────────────────────────────────────────────
+
+await check('队列模板：一条模板一行，正在编辑的那行标出来，只剩一个时不许删', () => {
+  const removes = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')
+  assert.equal(removes.length, 2, `一条模板一个删除按钮，实际 ${removes.length}`)
+
+  const inputs = runtime.nodes.filter((node) => node.props?.['data-name'] === 'templateName')
+  assert.deepEqual(inputs.map((node) => node.props.value), ['默认模板', '备用模板'], '名字就是模板名')
+  assert.deepEqual(inputs.map((node) => node.props.disabled), [false, false])
+
+  const edits = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-select')
+  assert.equal(edits.length, 2)
+  assert.equal(edits[0].props.disabled, true, '正在编辑的那个不用再点')
+  assert.equal(edits[0].text, 'templateEditing')
+  assert.equal(edits[1].props.disabled, false, '另一个可以切过去')
+  assert.equal(edits[1].text, 'templateEdit')
+
+  const remove = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')
+  assert.deepEqual(remove.map((node) => node.props.disabled), [false, false], '两个模板时可以删')
+  assert.equal(remove[0].props.title, 'templateDelete')
+})
+
+await check('队列模板：改名字只在失焦时提交，且只提交这一条的 order', async () => {
+  const before = requests.length
+  const input = runtime.nodes.filter((node) => node.props?.['data-name'] === 'templateName')[0]
+  // 边打字边提交会把「默认模」这种半截名字写进设置里，所以只在失焦/回车时发。
+  await input.props.onChange({ target: { value: '主力' } })
+  await runtime.mount(page(props))
+  assert.equal(requests.slice(before).filter((row) => row.method === 'POST').length, 0, '打字时不提交')
+
+  const again = runtime.nodes.filter((node) => node.props?.['data-name'] === 'templateName')[0]
+  await again.props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1, '失焦后应只发一个 POST')
+  const body = posts[0].body
+  assert.equal(body.templates[0].name, '主力', '名字改了')
+  assert.equal(body.templates[1].name, '备用模板', '别的模板原样带回去')
+  assert.equal(body.templates[1].order.length, 0, '别的模板的队列不该被动')
+  assert.equal(body.editedTemplate, undefined, '改名不该顺手切换正在编辑的模板')
+})
+
+await check('队列模板：切到另一个模板，队列卡换成它的 queue，队列为空也不报错', async () => {
+  const before = requests.length
+  const target = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-select' && node.props.disabled !== true)[0]
+  await target.props.onClick()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { editedTemplate: 'spare' })
+})
+
+await check('队列模板：新建模板给一个新 id 并自动切过去', async () => {
+  const before = requests.length
+  const add = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-add')[0]
+  assert.equal(add.props.disabled, false, '两个模板远没到上限')
+  await add.props.onClick()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1, '新建应该一次写清：新数组 + 新的编辑目标')
+  const body = posts[0].body
+  assert.equal(Array.isArray(body.templates), true)
+  assert.equal(body.templates.length, 3, '原来两条 + 新建一条')
+  const created = body.templates[2]
+  assert.match(created.id, /^[A-Za-z0-9_-]{1,32}$/, `id 要能被宿主接受，实际是 ${created.id}`)
+  // 字典在测试里是 key 回声，所以名字长这样；真实界面是「新模板 3」。
+  assert.match(created.name, /^templateNewName \d+$/, `实际是 ${created.name}`)
+  assert.deepEqual(created.order, [])
+  assert.equal(body.editedTemplate, created.id, '建完自动切过去')
 })
 
 await check('卸载时 effect 的清理函数把样式表收回去', () => {

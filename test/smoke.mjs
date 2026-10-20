@@ -197,7 +197,17 @@ async function harness({ order, scripts, settings: overrides = {}, at = new Date
   const clock = { ms: at }
   const settings = new JsonFile(join(HOME, `settings-${Math.random().toString(36).slice(2)}.json`), undefined,
     (raw) => ({ ...DEFAULT_SETTINGS, ...(raw !== null && typeof raw === 'object' ? raw : {}) }))
-  settings.replace({ ...DEFAULT_SETTINGS, ...overrides, order })
+  // 测试里只关心「一条队列」，所以 order 在这里包成默认模板 —— 省得几十个
+  // 用例都要写一遍模板对象。要验多模板时传 settings.templates 覆盖。
+  const templates = Array.isArray(overrides.templates)
+    ? overrides.templates
+    : [{ id: 'default', name: '默认模板', order }]
+  settings.replace({
+    ...DEFAULT_SETTINGS,
+    ...overrides,
+    templates,
+    editedTemplate: overrides.editedTemplate ?? templates[0].id,
+  })
 
   const health = new DailyHealth(
     new JsonFile(join(HOME, `state-${Math.random().toString(36).slice(2)}.json`), undefined, normalizeState),
@@ -826,7 +836,7 @@ await check('空队列：给出可操作的报错', async () => {
   const h = await harness({ order: [], scripts: new Map() })
   const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
   assert.equal(finishOf(chunks)?.reason?.failure?.code, 'NO_CANDIDATES')
-  assert.match(finishOf(chunks)?.reason?.failure?.message ?? '', /队列还是空的/)
+  assert.match(finishOf(chunks)?.reason?.failure?.message ?? '', /还是空的/)
 })
 
 // 8 · 关掉「同模型重发一次」
@@ -933,11 +943,13 @@ await check('适配器契约：providerInfo / listModels / resolveModel / retryP
   const models = await h.adapter.listModels(ROUTE)
   assert.equal(models.length, 1)
   assert.equal(models[0].provider, ROUTE)
-  assert.equal(models[0].id, 'auto')
+  assert.equal(models[0].id, 'default')
+  assert.equal(models[0].name, '默认模板')
   assert.ok(Array.isArray(models[0].inputModalities))
 
-  const info = await h.adapter.resolveModel(ROUTE, 'auto')
-  assert.equal(info.id, 'auto')
+  const info = await h.adapter.resolveModel(ROUTE, 'default')
+  assert.equal(info.id, 'default')
+  assert.equal(info.name, '默认模板')
   assert.equal(info.context.contextWindow, 8192, '应声明队列里最窄的上下文窗口')
   // 这条路由要面对一串各有各档位表的模型，所以对外只能声明并集；缺省档位留给
   // 每个候选自己的适配器决定（那才是它「正常使用」时的表现）。
@@ -953,8 +965,8 @@ await check('适配器契约：providerInfo / listModels / resolveModel / retryP
   assert.equal(typeof policy.jitterRatio, 'number')
   assert.equal('backoff' in policy, false, '不能交出嵌套的 backoff 形状')
 
-  const prepared = await h.adapter.prepareCall(ROUTE, 'auto')
-  assert.equal(prepared.model.id, 'auto')
+  const prepared = await h.adapter.prepareCall(ROUTE, 'default')
+  assert.equal(prepared.model.id, 'default')
   assert.equal(typeof prepared.stream, 'function')
 })
 
@@ -1008,6 +1020,79 @@ await check('思考强度：某个模型专设的档位优先于路由级的选�
 
   await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', reasoningEffort: 'high', messages: [user('做点事')] }))
   assert.equal(h.llm.calls[0].effort, 'low', '专设优先，不被路由级盖掉')
+})
+
+// 12.5 · 队列模板：每个模板就是模型选择器里的一个模型
+const twoTemplates = () => ([
+  { id: 'default', name: '默认模板', order: [{ provider: 'alpha', model: 'one' }] },
+  { id: 'spare', name: '备用模板', order: [{ provider: 'beta', model: 'one' }] },
+])
+
+await check('模板即模型：listModels 一条模板一个模型，名字就是模板名', async () => {
+  const h = await harness({ order: [], scripts: new Map(), settings: { templates: twoTemplates() } })
+  const models = await h.adapter.listModels(ROUTE)
+  assert.deepEqual(models.map((row) => row.id), ['default', 'spare'])
+  assert.deepEqual(models.map((row) => row.name), ['默认模板', '备用模板'])
+  assert.ok(models.every((row) => row.provider === ROUTE))
+})
+
+await check('选了哪个模板就跑哪条队列：模型 id 就是模板 id', async () => {
+  const h = await harness({
+    order: [],
+    scripts: new Map([[routeKey('alpha', 'one'), ok('默认模板跑的')], [routeKey('beta', 'one'), ok('备用模板跑的')]]),
+    settings: { templates: twoTemplates() },
+  })
+
+  const spare = await drain(h.adapter.stream({ provider: ROUTE, model: 'spare', messages: [user('用备用那套')] }))
+  assert.equal(textOf(spare), '备用模板跑的')
+  assert.deepEqual(commands(h.llm), [routeKey('beta', 'one')], '备选模板只该碰它自己队列里的模型')
+
+  const dflt = await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('用默认那套')] }))
+  assert.equal(textOf(dflt), '默认模板跑的')
+  assert.deepEqual(commands(h.llm), [routeKey('beta', 'one'), routeKey('alpha', 'one')])
+})
+
+await check('认不出的模板 id 退回第一个模板，不报错（删掉的模板 / 老的 auto）', async () => {
+  const h = await harness({
+    order: [],
+    scripts: new Map([[routeKey('alpha', 'one'), ok('兜底')]]),
+    settings: { templates: twoTemplates() },
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('老会话')] }))
+  assert.equal(textOf(chunks), '兜底')
+  assert.equal(finishOf(chunks)?.reason?.kind, 'stop')
+})
+
+await check('隔离按「会话 × 模板」分开：默认模板撞的墙不影响备用模板', async () => {
+  const h = await harness({
+    order: [],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), quota('默认模板的额度用完了')],
+      [routeKey('beta', 'one'), ok('备用模板好着呢')],
+    ]),
+    settings: { templates: twoTemplates() },
+  })
+
+  const first = await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('先跑默认')], sessionId: 's1' }))
+  assert.equal(finishOf(first)?.reason?.kind, 'error', '默认模板里唯一的候选挂了')
+
+  const spare = await drain(h.adapter.stream({ provider: ROUTE, model: 'spare', messages: [user('再跑备用')], sessionId: 's1' }))
+  assert.equal(textOf(spare), '备用模板好着呢', '同一个会话换模板不该被另一条模板的隔离挡住')
+})
+
+await check('红绿计数：失败一次记一次、成功一次记一次，跨会话合计', async () => {
+  const alphaKey = routeKey('alpha', 'one')
+  const scripts = new Map([[alphaKey, quota('额度没了')]])
+  const h = await harness({ order: [{ provider: 'alpha', model: 'one' }], scripts })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('会失败')], sessionId: 's1' }))
+
+  // 换脚本让它成功：同一个模型、另一个会话，计数要累加。
+  scripts.set(alphaKey, ok('成了'))
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('会成功')], sessionId: 's2' }))
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('再成功一次')], sessionId: 's2' }))
+
+  const counts = h.health.view(h.clock.ms, 1).counts[alphaKey]
+  assert.deepEqual(counts, { fail: 1, ok: 2 }, `实际是 ${JSON.stringify(counts)}`)
 })
 
 // 13 · 宿主半身的设置接口
@@ -1094,8 +1179,10 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     assert.ok(catalogKeys.includes(routeKey('alpha', 'one')))
     assert.ok(catalogKeys.includes(routeKey('beta', 'one')))
     assert.equal(catalogKeys.includes(routeKey(ROUTE, 'auto')), false, '插件自己的路由不该出现在候选清单里')
-    assert.deepEqual(state.json.settings.order.map((item) => routeKey(item.provider, item.model)).sort(),
+    assert.deepEqual(state.json.settings.templates[0].order.map((item) => routeKey(item.provider, item.model)).sort(),
       [routeKey('alpha', 'one'), routeKey('beta', 'one')].sort(), '首次运行应把已接入的模型灌进队列')
+    assert.equal(state.json.settings.templates[0].id, 'default')
+    assert.equal(state.json.settings.editedTemplate, 'default')
 
     // 设置页要按每个模型自己的档位表画下拉框，所以清单行必须带上档位。
     const row = (provider, model) => state.json.catalog.find((item) => item.provider === provider && item.model === model)
@@ -1103,26 +1190,30 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     assert.equal(row('alpha', 'one').effortsKnown, true)
     assert.deepEqual(row('beta', 'one').efforts.map((effort) => effort.id), ['minimal', 'high'])
 
-    // 调整顺序
+    // 调整顺序（整条模板一起写回去：名字和队列是同一次请求）
     const reordered = await call('POST', '/api/dsh-model-failover/settings', {
-      order: [
-        { provider: 'beta', model: 'one', reasoningEffort: 'minimal' },
-        { provider: 'alpha', model: 'one' },
-      ],
+      templates: [{
+        id: 'default',
+        name: '默认模板',
+        order: [
+          { provider: 'beta', model: 'one', reasoningEffort: 'minimal' },
+          { provider: 'alpha', model: 'one' },
+        ],
+      }],
       resetHour: 5,
       continueText: '接着做',
     })
-    assert.deepEqual(reordered.json.settings.order.map((item) => item.provider), ['beta', 'alpha'])
-    assert.equal(reordered.json.settings.order[0].reasoningEffort, 'minimal', '每个候选的档位要能存下来')
-    assert.equal('reasoningEffort' in reordered.json.settings.order[1], false, '没设档位的候选不该多个空字段')
+    assert.deepEqual(reordered.json.settings.templates[0].order.map((item) => item.provider), ['beta', 'alpha'])
+    assert.equal(reordered.json.settings.templates[0].order[0].reasoningEffort, 'minimal', '每个候选的档位要能存下来')
+    assert.equal('reasoningEffort' in reordered.json.settings.templates[0].order[1], false, '没设档位的候选不该多个空字段')
     assert.equal(reordered.json.settings.resetHour, 5)
     assert.equal(reordered.json.settings.continueText, '接着做')
 
     // 空白档位等于「没设」：下拉框回到「默认档位」时就是这条路径。
     const blank = await call('POST', '/api/dsh-model-failover/settings', {
-      order: [{ provider: 'beta', model: 'one', reasoningEffort: '  ' }, { provider: 'alpha', model: 'one' }],
+      templates: [{ id: 'default', name: '默认模板', order: [{ provider: 'beta', model: 'one', reasoningEffort: '  ' }, { provider: 'alpha', model: 'one' }] }],
     })
-    assert.equal('reasoningEffort' in blank.json.settings.order[0], false, '空白档位应被收敛成「没设」')
+    assert.equal('reasoningEffort' in blank.json.settings.templates[0].order[0], false, '空白档位应被收敛成「没设」')
 
     // 非法值被就地修好，而不是留给执行路径
     const clamped = await call('POST', '/api/dsh-model-failover/settings', { resetHour: 99, eventLogLimit: 0 })

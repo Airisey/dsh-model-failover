@@ -28,10 +28,15 @@ import { Catalog } from './lib/catalog.js'
 import {
   API_PREFIX,
   DEFAULT_SETTINGS,
-  MODEL_ID,
+  DEFAULT_TEMPLATE_ID,
+  DEFAULT_TEMPLATE_NAME,
+  MAX_TEMPLATES,
+  MAX_TEMPLATE_CANDIDATES,
+  MAX_TEMPLATE_NAME,
   NAMESPACE,
   ROUTE,
   ROUTE_LABEL,
+  emptyTemplate,
   routeKey,
   splitKey,
 } from './lib/constants.js'
@@ -74,33 +79,82 @@ const CONTINUE_DELAY_HARD_LIMIT = 300
 const NOTES_PER_SESSION = 200
 
 /**
- * 把任意 JSON 收敛成设置形状。任何一项缺失或类型不对都回落到默认值。
+ * 把一份候选列表收敛成 `[{provider, model, reasoningEffort?}]`，顺便去重。
  *
- * 队列顺序顺便在这里去重：重复的候选只会让同一次失败被重复尝试两遍，
- * 而它的代价（多烧一次上游额度）远大于在这里多写四行。
+ * 重复的候选只会让同一次失败被重复尝试两遍，而它的代价（多烧一次上游额度）
+ * 远大于在这里多写四行。
+ */
+function normalizeCandidates(raw) {
+  const order = []
+  if (!Array.isArray(raw)) return order
+  const seen = new Set()
+  for (const item of raw) {
+    if (order.length >= MAX_TEMPLATE_CANDIDATES) break
+    if (item === null || typeof item !== 'object') continue
+    const provider = typeof item.provider === 'string' ? item.provider.trim() : ''
+    const model = typeof item.model === 'string' ? item.model.trim() : ''
+    if (provider === '' || model === '') continue
+    const key = routeKey(provider, model)
+    if (seen.has(key)) continue
+    seen.add(key)
+    // 每个候选可以自带思考强度；空串与缺失同义，都表示「用这个模型自己的默认档位」。
+    const reasoningEffort =
+      typeof item.reasoningEffort === 'string' && item.reasoningEffort.trim() !== ''
+        ? item.reasoningEffort.trim()
+        : undefined
+    order.push(reasoningEffort === undefined ? { provider, model } : { provider, model, reasoningEffort })
+  }
+  return order
+}
+
+/** 模板 id 会被当成模型 id 用，所以只收 URL / id 里安全的字符。 */
+function normalizeTemplateId(raw, fallback) {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  return /^[A-Za-z0-9_-]{1,32}$/.test(text) ? text : fallback
+}
+
+/**
+ * 队列模板：至少一条、id 唯一。
+ *
+ * 老版本只有一个扁平的 `order`（这一层还没有模板）。读到那种设置时把它整份
+ * 灌进默认模板 —— 升级之后队列还在，只是从「一条队列」变成「默认模板」。
+ */
+function normalizeTemplates(source) {
+  const raw = Array.isArray(source.templates) ? source.templates : undefined
+  const templates = []
+  const seen = new Set()
+  for (const item of raw ?? []) {
+    if (templates.length >= MAX_TEMPLATES) break
+    if (item === null || typeof item !== 'object') continue
+    const fallback = `t${templates.length}`
+    let id = normalizeTemplateId(item.id, fallback)
+    if (seen.has(id)) id = fallback
+    if (seen.has(id)) continue
+    seen.add(id)
+    const name =
+      typeof item.name === 'string' && item.name.trim() !== ''
+        ? item.name.trim().slice(0, MAX_TEMPLATE_NAME)
+        : id === DEFAULT_TEMPLATE_ID
+          ? DEFAULT_TEMPLATE_NAME
+          : id
+    templates.push({ id, name, order: normalizeCandidates(item.order) })
+  }
+  if (templates.length === 0) {
+    templates.push({ ...emptyTemplate(), order: normalizeCandidates(source.order) })
+  }
+  return templates
+}
+
+/**
+ * 把任意 JSON 收敛成设置形状。任何一项缺失或类型不对都回落到默认值。
  */
 export function normalizeSettings(raw) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
 
-  const order = []
-  if (Array.isArray(source.order)) {
-    const seen = new Set()
-    for (const item of source.order) {
-      if (item === null || typeof item !== 'object') continue
-      const provider = typeof item.provider === 'string' ? item.provider.trim() : ''
-      const model = typeof item.model === 'string' ? item.model.trim() : ''
-      if (provider === '' || model === '') continue
-      const key = routeKey(provider, model)
-      if (seen.has(key)) continue
-      seen.add(key)
-      // 每个候选可以自带思考强度；空串与缺失同义，都表示「用这个模型自己的默认档位」。
-      const reasoningEffort =
-        typeof item.reasoningEffort === 'string' && item.reasoningEffort.trim() !== ''
-          ? item.reasoningEffort.trim()
-          : undefined
-      order.push(reasoningEffort === undefined ? { provider, model } : { provider, model, reasoningEffort })
-    }
-  }
+  const templates = normalizeTemplates(source)
+  const editedTemplate = templates.some((template) => template.id === source.editedTemplate)
+    ? source.editedTemplate
+    : templates[0].id
 
   const hiddenProviders = Array.isArray(source.hiddenProviders)
     ? [...new Set(source.hiddenProviders.filter((id) => typeof id === 'string' && id.trim() !== '').map((id) => id.trim()))]
@@ -135,7 +189,8 @@ export function normalizeSettings(raw) {
   return {
     enabled: source.enabled !== false,
     bootstrapped: source.bootstrapped === true,
-    order,
+    templates,
+    editedTemplate,
     resetHour,
     retrySameModelOnce: source.retrySameModelOnce !== false,
     continueText:
@@ -281,17 +336,18 @@ export function apply(ctx, _config) {
     }
     const latest = settingsFile.get()
     if (latest.bootstrapped) return
-    const seen = new Set(latest.order.map((item) => routeKey(item.provider, item.model)))
-    const order = [...latest.order]
+    const template = latest.templates[0]
+    const seen = new Set(template.order.map((item) => routeKey(item.provider, item.model)))
+    const order = [...template.order]
     for (const entry of entries) {
       const key = routeKey(entry.provider, entry.model)
       if (seen.has(key)) continue
       seen.add(key)
       order.push({ provider: entry.provider, model: entry.model })
     }
-    settingsFile.update({ bootstrapped: true, order })
+    settingsFile.update({ bootstrapped: true, templates: [{ ...template, order }, ...latest.templates.slice(1)] })
     settingsFile.flush()
-    logger.info?.(`model-failover: 已把 ${order.length} 个已接入的模型排进队列，可在设置页调整顺序`)
+    logger.info?.(`model-failover: 已把 ${order.length} 个已接入的模型排进「${template.name}」，可在设置页调整顺序`)
   }
 
   /** 扫完目录顺手补齐上下文窗口与档位表，失败不影响任何功能。 */
@@ -318,6 +374,7 @@ export function apply(ctx, _config) {
     const settings = settingsFile.get()
     const view = health.view(now, settings.resetHour)
     const decorate = (row) => ({ ...row, ...splitKey(row.key), label: labelOf(row.provider, row.model) })
+    const templateName = (id) => settings.templates.find((template) => template.id === id)?.name ?? id ?? ''
     const table = new Map()
     const rowOf = (sessionId) => {
       let row = table.get(sessionId)
@@ -338,6 +395,8 @@ export function apply(ctx, _config) {
         model: hit.model,
         at: hit.at,
         label: labelOf(hit.provider, hit.model),
+        templateId: hit.template,
+        templateName: hit.template === undefined ? '' : templateName(hit.template),
       }
     }
     // 有事的会话排前面：隔离着的 → 正在跑的 → 其余。
@@ -357,7 +416,7 @@ export function apply(ctx, _config) {
     const decorate = (row) => ({ ...row, ...splitKey(row.key), label: labelOf(row.provider, row.model) })
     return {
       ok: true,
-      route: { provider: ROUTE, model: MODEL_ID, label: ROUTE_LABEL },
+      route: { provider: ROUTE, label: ROUTE_LABEL },
       now,
       day: view.day,
       nextResetAt: nextResetAt(now, settings.resetHour),
@@ -377,6 +436,9 @@ export function apply(ctx, _config) {
       catalogScannedAt: catalog.at,
       quarantined: view.quarantined.map(decorate),
       good: view.good.map(decorate),
+      // 每模型当天的失败/成功次数（所有会话、所有模板合计）——设置页队列前面
+      // 那对红绿数字就是它。
+      counts: view.counts,
       sessions: sessionRows(now),
       events: logFile.get().events.slice(-EVENTS_IN_SNAPSHOT).reverse(),
       dataDir: dir,
@@ -389,7 +451,8 @@ export function apply(ctx, _config) {
     const next = { ...current }
     if ('enabled' in patch) next.enabled = patch.enabled !== false
     if ('bootstrapped' in patch) next.bootstrapped = patch.bootstrapped === true
-    if ('order' in patch) next.order = patch.order
+    if ('templates' in patch) next.templates = patch.templates
+    if ('editedTemplate' in patch) next.editedTemplate = patch.editedTemplate
     if ('resetHour' in patch) next.resetHour = patch.resetHour
     if ('retrySameModelOnce' in patch) next.retrySameModelOnce = patch.retrySameModelOnce !== false
     if ('continueText' in patch) next.continueText = patch.continueText
@@ -476,7 +539,10 @@ export function apply(ctx, _config) {
           ok: true,
           now,
           day: health.view(now, settingsFile.get().resetHour).day,
-          route: { provider: ROUTE, model: MODEL_ID, label: ROUTE_LABEL },
+          route: { provider: ROUTE, label: ROUTE_LABEL },
+          // 会话页要显示「这个会话用的是哪个模板」，所以把 id → 名字的表一起带上
+          // （这一份很小，不像 /state 那样驮着整个模型清单）。
+          templates: settingsFile.get().templates.map((template) => ({ id: template.id, name: template.name })),
           sessions: sessionRows(now),
         })
         return

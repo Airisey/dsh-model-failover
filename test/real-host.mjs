@@ -151,7 +151,10 @@ async function boot(spec) {
     JSON.stringify({
       enabled: true,
       bootstrapped: true,
-      order: spec.order,
+      // 这一套只关心「一条队列怎么接力」，所以把 order 包进默认模板：模板
+      // 那一层的增删改在 smoke.mjs / client.mjs 里单独验。
+      templates: [{ id: 'default', name: '默认模板', order: spec.order }],
+      editedTemplate: 'default',
       resetHour: 1,
       continueText: '继续',
       retrySameModelOnce: true,
@@ -180,7 +183,7 @@ async function boot(spec) {
   return {
     app,
     dataDir,
-    async stream(model = 'auto', extra = {}) {
+    async stream(model = 'default', extra = {}) {
       const chunks = []
       for await (const chunk of app.llm.stream({
         provider: ROUTE,
@@ -199,13 +202,15 @@ async function boot(spec) {
     /**
      * 读落盘的隔离状态。
      *
-     * 真正的文件形状是 `{ day, sessions: { [sessionId]: { quarantine, good } } }`
-     * —— 隔离按会话分开记。这里所有 `stream()` 都没传 `sessionId`，所以全部落在
-     * 空串那一桶；摊平返回它，断言就能照旧写 `state.quarantine[...]`。
+     * 真正的文件形状是
+     * `{ day, sessions: { [sessionId]: { templates: { [templateId]: { quarantine, good } } } } }`
+     * —— 隔离按「会话 × 模板」分开记。这里所有 `stream()` 都没传 `sessionId`，
+     * 模板也一直是默认那个，所以全部落在空串会话的 `default` 桶；摊平返回它，
+     * 断言就能照旧写 `state.quarantine[...]`。
      */
     state() {
       const raw = JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8'))
-      const bucket = raw?.sessions?.[''] ?? { quarantine: {}, good: {} }
+      const bucket = raw?.sessions?.['']?.templates?.default ?? { quarantine: {}, good: {} }
       return { day: raw?.day, quarantine: bucket.quarantine, good: bucket.good, sessions: raw?.sessions }
     },
     dispose() {
@@ -242,7 +247,7 @@ await check('真注册表：宿主校验放行 listModels / resolveModelInfo / r
   try {
     const models = await h.app.llm.listModels(ROUTE)
     assert.equal(models.length, 1)
-    assert.equal(models[0].id, 'auto')
+    assert.equal(models[0].id, 'default')
 
     const info = await h.app.llm.resolveModelInfo(ROUTE, 'auto')
     assert.equal(info.id, 'auto')
@@ -286,11 +291,11 @@ await check('真宿主：队列的档位并集过得了宿主校验，不认识�
       `对外应声明队列里出现过的档位并集：${JSON.stringify(info.reasoning)}`,
     )
 
-    const prepared = await h.app.llm.prepareCall({ provider: ROUTE, model: 'auto', reasoningEffort: 'minimal' })
+    const prepared = await h.app.llm.prepareCall({ provider: ROUTE, model: 'default', reasoningEffort: 'minimal' })
     assert.equal(prepared.config.reasoningEffort, 'minimal', '队列里出现过的档位应放行')
 
     await assert.rejects(
-      () => h.app.llm.prepareCall({ provider: ROUTE, model: 'auto', reasoningEffort: '不存在的档位' }),
+      () => h.app.llm.prepareCall({ provider: ROUTE, model: 'default', reasoningEffort: '不存在的档位' }),
       (error) => {
         assert.equal(error?.code, 'UNSUPPORTED_REASONING_EFFORT', `挡下时的错误码不对：${error?.code} ${error?.message}`)
         return true
