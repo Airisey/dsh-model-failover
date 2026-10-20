@@ -1170,6 +1170,37 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     const other = await call('GET', '/api/dsh-model-failover/sessions')
     assert.equal(other.json.sessions.filter((row) => row.sessionId === 'sess-queue').length, 1, '同一会话只出现一次')
 
+    // ── 按会话解除隔离（会话页那一栏的按钮） ────────────────────────────────
+    // 先让第二个会话也撞同一堵墙：beta 仍然没有脚本。
+    for await (const _ of registrations[0].adapter.stream({
+      provider: ROUTE,
+      model: 'auto',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '再跑一次' }] }],
+      sessionId: 'sess-other',
+    })) { /* 把流跑完 */ }
+
+    const bothStuck = await call('GET', '/api/dsh-model-failover/sessions')
+    const stuckSessions = bothStuck.json.sessions
+      .filter((row) => row.quarantined.some((item) => item.key === routeKey('beta', 'one')))
+      .map((row) => row.sessionId)
+    assert.ok(stuckSessions.includes('sess-queue') && stuckSessions.includes('sess-other'), `两个会话都该挂着 beta/one：${JSON.stringify(stuckSessions)}`)
+
+    const scoped = await call('POST', '/api/dsh-model-failover/reset?sessionId=sess-queue', {})
+    assert.equal(scoped.status, 200)
+    assert.equal(scoped.json.ok, true)
+    assert.equal(scoped.json.sessionId, 'sess-queue')
+    assert.equal(scoped.json.cleared, 1, '只该解除那一个会话的隔离')
+    const afterScoped = scoped.json.sessions.find((row) => row.sessionId === 'sess-queue')
+    assert.equal(afterScoped.quarantined.length, 0, '当前会话的隔离应被清空')
+    const survivor = scoped.json.sessions.find((row) => row.sessionId === 'sess-other')
+    assert.equal(survivor.quarantined.length, 1, '别的会话一条都不许动')
+    assert.equal(survivor.quarantined[0].sessionId, 'sess-other')
+
+    // 已经有隔离的会话再点一次：什么也没解除，但也不能报错。
+    const again = await call('POST', '/api/dsh-model-failover/reset?sessionId=sess-queue', {})
+    assert.equal(again.status, 200)
+    assert.equal(again.json.cleared, 0, '没有隔离可解时返回 0')
+
     const unknown = await call('GET', '/api/dsh-model-failover/nope')
     assert.equal(unknown.status, 404)
 

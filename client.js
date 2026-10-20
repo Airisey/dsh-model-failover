@@ -130,9 +130,6 @@ window.__ModuleLoader__.load({
         effortNone: '无档位',
         effortHint: '「默认档位」＝这个模型平时的档位（不指定）；档位表由模型自己提供。',
         queueEmpty: '队列是空的。从下面挑一个模型加进来，或者点「重新扫描」。',
-        refQuarantine: '隔离中',
-        stuckIn: '撞过的会话：{list}',
-        refGood: '已验证',
         moveUp: '上移',
         moveDown: '下移',
         remove: '移出队列',
@@ -140,8 +137,7 @@ window.__ModuleLoader__.load({
         add: '添加',
         noModels: '没有扫到可用的模型。',
         quarantined: '今日隔离名单',
-        quarantinedHint: '这些模型今天不再被用来起头；解除后立即可用。隔离按会话算，所以同一个模型可能挂在不同的会话名下。点左边的箭头看完整报错。',
-        clearQuarantine: '解除今日隔离',
+        quarantinedHint: '这些模型今天不再被用来起头。隔离按会话算，所以同一个模型可能挂在不同的会话名下；要解除，去会话页「隔离队列」那一栏，那里只解除当前会话的。点左边的箭头看完整报错。',
         attempts: '尝试次数',
         expand: '展开报错详情',
         collapse: '收起报错详情',
@@ -206,12 +202,15 @@ window.__ModuleLoader__.load({
         evQuarantine: '{provider}/{model} 无法输出（{code}），今日隔离',
         evRollover: '跨过 {hour} 点：{from} → {to}，隔离名单已清空',
         evReset: '手动解除隔离，清了 {count} 个',
+        evResetSession: '会话 {session} 手动解除隔离，清了 {count} 个',
         evForget: '重置了今天的运行状态',
         tailModel: '本轮：{label}',
         viewQuarantine: '隔离队列',
         qvHint:
-          '隔离是「按会话」算的：某个模型在哪个会话里撞了墙，就只在那个会话里被跳过，别的会话照常用它。下面按会话列出正在使用的模型和已经被隔离的模型。',
+          '隔离是「按会话」算的：某个模型在哪个会话里撞了墙，就只在那个会话里被跳过，别的会话照常用它。下面按会话列出正在使用的模型和已经被隔离的模型。右上角那个按钮只解除你自己这个会话的隔离。',
         qvRefresh: '刷新',
+        qvClear: '解除本会话隔离',
+        qvClearHint: '只解除当前这个会话的隔离，别的会话不受影响。',
         qvLoading: '读取中…',
         qvFailed: '读取失败：{message}',
         qvEmpty: '还没有任何会话跑过。',
@@ -243,9 +242,6 @@ window.__ModuleLoader__.load({
         effortNone: 'No effort',
         effortHint: '"Default effort" keeps the model’s own level (nothing is specified); the levels come from the model itself.',
         queueEmpty: 'The queue is empty. Add a model below, or press Rescan.',
-        refQuarantine: 'quarantined',
-        stuckIn: 'Failed in: {list}',
-        refGood: 'verified',
         moveUp: 'Move up',
         moveDown: 'Move down',
         remove: 'Remove',
@@ -253,8 +249,7 @@ window.__ModuleLoader__.load({
         add: 'Add',
         noModels: 'No models were discovered.',
         quarantined: 'Quarantined today',
-        quarantinedHint: 'These models will not start a task today. Clearing makes them usable immediately. Quarantine is per conversation, so the same model can appear under several conversations. Use the arrow at left to see the full error.',
-        clearQuarantine: 'Clear today’s quarantine',
+        quarantinedHint: 'These models will not start a task today. Quarantine is per conversation, so the same model can appear under several conversations; to clear one, use the Quarantine queue tab on the conversation page — it only clears the conversation you are in. Use the arrow at left to see the full error.',
         attempts: 'attempts',
         expand: 'Show the full error',
         collapse: 'Hide the error',
@@ -319,12 +314,15 @@ window.__ModuleLoader__.load({
         evQuarantine: '{provider}/{model} produced nothing ({code}) — quarantined today',
         evRollover: 'Crossed {hour}:00 — {from} → {to}, quarantine cleared',
         evReset: 'Quarantine cleared by hand — {count} released',
+        evResetSession: 'Quarantine cleared by hand in conversation {session} — {count} released',
         evForget: 'Today’s runtime state was reset',
         tailModel: 'Turn: {label}',
         viewQuarantine: 'Quarantine',
         qvHint:
-          'Quarantine is per conversation: a model that failed inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined.',
+          'Quarantine is per conversation: a model that failed inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined. The button at the right only clears the conversation you are in.',
         qvRefresh: 'Refresh',
+        qvClear: 'Clear this conversation',
+        qvClearHint: 'Only clears the quarantine of the conversation you are in; other conversations are untouched.',
         qvLoading: 'Loading…',
         qvFailed: 'Could not load: {message}',
         qvEmpty: 'No conversation has run anything yet.',
@@ -584,50 +582,12 @@ window.__ModuleLoader__.load({
       const settings = state?.settings
       const order = useMemo(() => (Array.isArray(settings?.order) ? settings.order : []), [settings])
 
-      const quarantined = useMemo(() => {
-        const map = new Map()
-        for (const row of state?.quarantined ?? []) map.set(row.key, row)
-        return map
-      }, [state])
-
       /**
-       * 每个模型被哪些会话隔离着。
-       *
-       * 队列徽标问的是「这个模型今天还能不能起头」。隔离按会话算，所以答案不是
-       * 简单的能 / 不能：它在甲会话里废了，在乙会话里照样能用。徽标上带个数字，
-       * 用户就知道那是「一个会话」还是「到处都撞墙」。
-       */
-      const stuckIn = useMemo(() => {
-        const table = new Map()
-        for (const row of state?.quarantined ?? []) {
-          const bucket = table.get(row.key) ?? []
-          bucket.push(row)
-          table.set(row.key, bucket)
-        }
-        return table
-      }, [state])
-
-      /**
-       * 队列徽标的悬停提示：错误码 + 是哪些会话撞的。
-       *
-       * 一个模型挂在多个会话名下时，光看「隔离中 ×3」还是不知道躲不躲得开 ——
-       * 也许三个都是别人的会话，当前这个照常能用。把会话号列出来就答得了。
-       */
-      const stuckTitle = useCallback((key, row) => {
-        const head = `${row.code ?? ''} ${row.message ?? ''}`.trim()
-        const others = (stuckIn.get(key) ?? []).map((item) => item.sessionId ?? '').filter((id) => id !== '')
-        if (others.length <= 1) return head
-        const list = others.map((id) => (id.length > 8 ? id.slice(0, 8) : id)).join(' / ')
-        return `${head}\n${t('stuckIn', { list })}`
-      }, [stuckIn, t])
-
-      /**
-       * 名单卡片用的行：按「模型 + 会话」去重，而不是只按模型。
+       * 名单卡片用的行：一行一个「模型 + 会话」。
        *
        * 隔离是按会话算的，同一个模型可能在三个会话里各撞过一次 —— 只按模型
        * 去重的话，页面只会显示其中一条（还是排序上最后的那个），另外两个会话
-       * 撞的墙就看不见了。徽标那边仍然按模型查（`quarantined`），因为「这个模型
-       * 今天能用吗」在队列里是按模型问的。
+       * 撞的墙就看不见了。
        */
       const quarantineRows = useMemo(() => {
         const seen = new Set()
@@ -641,7 +601,17 @@ window.__ModuleLoader__.load({
         return rows
       }, [state])
 
-      const good = useMemo(() => new Set((state?.good ?? []).map((row) => row.key)), [state])
+      /**
+       * 今天被隔离过的模型（任意会话）。
+       *
+       * 队列行上不再画隔离徽标了 —— 隔离是按会话算的，一行一个模型根本答不了
+       * 「在我这个会话里能不能用」。这个集合现在只服务「下一个任务会用谁」
+       * 那一格。
+       */
+      const quarantinedKeys = useMemo(
+        () => new Set((state?.quarantined ?? []).map((row) => row.key)),
+        [state],
+      )
 
       /** 已接入但还没进队列的模型，按 provider 分组给下拉框用。 */
       const available = useMemo(() => {
@@ -696,12 +666,12 @@ window.__ModuleLoader__.load({
         mutateOrder([...order, { provider, model }])
       }, [addKey, order, mutateOrder])
 
-      /** 队列里第一个既没被隔离、又产出过的模型 —— 也就是下一个任务真正的起点。 */
+      /** 队列里第一个没被隔离的模型 —— 也就是下一个任务会从谁起头。 */
       const startAt = useMemo(() => {
         if (order.length === 0) return undefined
-        const usable = order.find((item) => !quarantined.has(keyOf(item.provider, item.model)))
+        const usable = order.find((item) => !quarantinedKeys.has(keyOf(item.provider, item.model)))
         return usable ?? order[0]
-      }, [order, quarantined])
+      }, [order, quarantinedKeys])
 
       const labelOf = useCallback((provider, model) => {
         const hit = (state?.catalog ?? []).find((row) => row.provider === provider && row.model === model)
@@ -726,7 +696,10 @@ window.__ModuleLoader__.load({
             body = t('evRollover', { hour: settings?.resetHour ?? 1, from: event.from ?? '?', to: event.to ?? '?' })
             break
           case 'reset':
-            body = t('evReset', { count: event.cleared ?? 0 })
+            // 带会话号的是会话页那个「解除本会话隔离」，不带的是全局解除。
+            body = typeof event.sessionId === 'string' && event.sessionId !== ''
+              ? t('evResetSession', { count: event.cleared ?? 0, session: event.sessionId.slice(0, 8) })
+              : t('evReset', { count: event.cleared ?? 0 })
             break
           case 'forget':
             body = t('evForget')
@@ -773,12 +746,6 @@ window.__ModuleLoader__.load({
             div({ className: 'mf-title' }, t('status')),
             div({ className: 'mf-actions' },
               h('button', { type: 'button', className: 'mf-btn', disabled: busy, onClick: () => void run('/refresh', {}) }, busy ? t('scanning') : t('refresh')),
-              h('button', {
-                type: 'button',
-                className: 'mf-btn',
-                disabled: busy || quarantined.size === 0,
-                onClick: () => void run('/reset', {}),
-              }, t('clearQuarantine')),
             ),
           ),
           div({ className: 'mf-grid' },
@@ -829,8 +796,6 @@ window.__ModuleLoader__.load({
           div({ className: 'mf-note' }, t('queueHint')),
           ...order.map((item, index) => {
               const key = keyOf(item.provider, item.model)
-              const bad = quarantined.get(key)
-              const isGood = good.has(key)
               const hit = (state.catalog ?? []).find((row) => row.provider === item.provider && row.model === item.model)
               return div({ className: 'mf-row', key },
                 span({ className: 'mf-idx' }, String(index + 1)),
@@ -858,19 +823,6 @@ window.__ModuleLoader__.load({
                             effort.name,
                           )),
                         )),
-                bad !== undefined
-                  ? span({
-                      className: 'mf-badge mf-bad',
-                      // 隔离按会话算：徽标上带数字，才知道是「就一个会话」还是
-                      // 「哪个会话都撞墙」。悬停时把会话号一并列出 —— 想知道
-                      // 「是哪个会话把我这个模型废了」不该逼人滚到名单里去数。
-                      title: stuckTitle(key, bad),
-                    },
-                      (stuckIn.get(key)?.length ?? 1) > 1
-                        ? `${t('refQuarantine')} ×${stuckIn.get(key).length}`
-                        : t('refQuarantine'),
-                    )
-                  : (isGood ? span({ className: 'mf-badge mf-ok' }, t('refGood')) : null),
                 div({ className: 'mf-actions' },
                   h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveUp'), disabled: busy || index === 0, onClick: () => move(index, -1) }, '↑'),
                   h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveDown'), disabled: busy || index === order.length - 1, onClick: () => move(index, 1) }, '↓'),
@@ -1288,10 +1240,55 @@ window.__ModuleLoader__.load({
         return typeof hit?.displayTitle === 'string' && hit.displayTitle !== '' ? hit.displayTitle : undefined
       }
 
+      /**
+       * 这个会话现在压着几个模型。
+       *
+       * 解除按钮只在真有东西可解时点得动 —— 一个从头到尾都正常的会话摆着一个
+       * 能按的按钮，按下去什么也不会发生，比按钮灰着更让人困惑。
+       *
+       * 没有会话号时按钮一律灰着：说不清「当前会话」是谁的时候，按下去要么
+       * 什么都不做，要么（更糟）落到「不分会话」那一桶里替后台任务解开。
+       */
+      const scoped = typeof mineId === 'string' && mineId !== ''
+      const mineRow = scoped ? rows.find((row) => row.sessionId === mineId) : undefined
+      const mineCount = Array.isArray(mineRow?.quarantined) ? mineRow.quarantined.length : 0
+
+      /**
+       * 只解除**当前这一栏**对应会话的隔离。
+       *
+       * 会话号走查询串，因为 POST 的 body 已经被设置补丁占用了；宿主那边按
+       * 「带不带 sessionId」分成按会话解除与全局解除两条路径。
+       */
+      const clearMine = useCallback(async () => {
+        if (!scoped || busy) return
+        setBusy(true)
+        try {
+          const next = await post(`/reset?sessionId=${encodeURIComponent(mineId)}`, {})
+          if (!alive.current) return
+          // 响应里已经把新的会话列表带回来了，先用它落屏，省一次往返。
+          if (Array.isArray(next?.sessions)) setData((previous) => ({ ...(previous ?? {}), ...next }))
+          setError('')
+          void load(false)
+        } catch (failure) {
+          if (!alive.current) return
+          setError(String(failure?.message ?? failure))
+        } finally {
+          if (alive.current) setBusy(false)
+        }
+      }, [busy, load, mineId, scoped])
+
       return div({ className: 'mf-qv' },
         div({ className: 'mf-qv-head' },
           div({ className: 'mf-title' }, t('viewQuarantine')),
           data?.day ? span({ className: 'mf-note' }, t('qvDay', { day: data.day })) : null,
+          h('button', {
+            type: 'button',
+            className: 'mf-btn',
+            // 没有隔离就没什么可解的：灰着比按下去没反应更好懂。
+            disabled: busy || !scoped || mineCount === 0,
+            title: t('qvClearHint'),
+            onClick: () => void clearMine(),
+          }, t('qvClear')),
           h('button', {
             type: 'button',
             className: 'mf-btn',

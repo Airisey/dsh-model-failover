@@ -497,6 +497,30 @@ export function apply(ctx, _config) {
       }
 
       if (method === 'POST' && path === '/reset') {
+        // 带 sessionId 就只解除那一个会话的隔离；不带才是全局解除。
+        //
+        // 会话页那一栏按会话显示，所以它的按钮必须按会话生效 —— 在甲会话里
+        // 点「解除」，凭什么让乙会话重新去撞同一堵墙。不带 sessionId 的全局
+        // 路径留着给脚本和以后可能的「一键全解」用，界面上的入口已经撤掉了。
+        if (sessionId !== undefined) {
+          const settings = settingsFile.get()
+          const cleared = health.clearSession(now, settings.resetHour, sessionId)
+          stateFile.flush()
+          pushEvent({
+            at: now,
+            kind: 'reset',
+            cleared,
+            sessionId,
+            day: health.view(now, settings.resetHour).day,
+          })
+          sendJson(res, 200, {
+            ok: true,
+            cleared,
+            sessionId,
+            sessions: sessionRows(now),
+          })
+          return
+        }
         const settings = settingsFile.get()
         const view = health.view(now, settings.resetHour)
         health.clear(now, settings.resetHour)

@@ -780,6 +780,84 @@ await check('隔离队列：手动刷新再问一次 /sessions，不会改任何
   }
 })
 
+// ── 解除隔离的按钮（只在会话页那一栏，只解当前会话） ─────────────────────────
+
+/** 有隔离的会话行，用来喂「解除本会话隔离」那个按钮。 */
+const stuckRow = (sessionId, overrides) => sessionRow({
+  sessionId,
+  quarantined: [{ key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId, label: 'Code99 · Beta One' }],
+  ...overrides,
+})
+
+await check('设置页不再有「解除今日隔离」按钮：那件事挪到会话页去了，且只解当前会话', () => {
+  const labels = runtime.nodes.filter((node) => node.tag === 'button').map((node) => node.text)
+  assert.equal(labels.includes('解除今日隔离'), false, '设置页那个全局解除按钮应当已经撤掉')
+})
+
+await check('隔离队列：解除按钮只解当前会话，请求带 sessionId 且只解那一个', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  let payload = [stuckRow('s-mine'), stuckRow('s-other')]
+  globalThis.fetch = async (url, options) => {
+    const target = String(url)
+    asked.push({ url: target, method: options?.method ?? 'GET' })
+    if ((options?.method ?? 'GET') === 'POST') {
+      // 宿主只解这一个会话：响应里回来的列表就是「我干净了、别人还挂着」。
+      payload = [sessionRow({ sessionId: 's-mine' }), stuckRow('s-other')]
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          now: at,
+          day: '2026-11-27',
+          cleared: 1,
+          sessionId: 's-mine',
+          sessions: payload,
+        }),
+      }
+    }
+    return sessionsPayload(payload)
+  }
+  let flat
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    await fresh.button('解除本会话隔离').props.onClick()
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  const posted = asked.filter((row) => row.method === 'POST')
+  assert.equal(posted.length >= 1, true, '按钮应当真的发一次 POST')
+  assert.equal(posted.every((row) => row.url.includes('/reset')), true, `只该打 /reset，实际：${JSON.stringify(posted.map((row) => row.url))}`)
+  assert.equal(
+    posted.every((row) => row.url.includes('sessionId=s-mine')),
+    true,
+    `必须带上当前会话号，否则会变成全局解除：${JSON.stringify(posted.map((row) => row.url))}`,
+  )
+  // 别人的隔离还在，所以那一行仍然写着 Code99 · Beta One。
+  assert.ok(flat.includes('Code99 · Beta One'), `别的会话的隔离不该被顺手清掉，实际：${flat.slice(0, 400)}`)
+})
+
+await check('隔离队列：本会话没被隔离时解除按钮是灰的，按不动', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine' }),
+    stuckRow('s-other'),
+  ])
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+  } finally {
+    globalThis.fetch = saved
+  }
+  const button = fresh.button('解除本会话隔离')
+  assert.equal(button.props.disabled, true, '自己没有隔离可解时不该能按')
+  assert.throws(() => fresh.enabledButton('解除本会话隔离'), /没有找到/, '不该存在可用的解除按钮')
+})
+
 // ── 首帧 / 错误态（各自一个全新的渲染器，避免和别的用例串味） ────────────────
 
 const page = sections[0].component
@@ -859,15 +937,21 @@ await check('挂载后自动 GET /state，并把队列、提供者名、数据�
   assert.ok(flat.includes('C:\\Users\\superv\\.dsh\\dsh-model-failover'), '应显示数据目录')
 })
 
-await check('今天隔离的模型带红色徽标，昨天验证可用的带绿色徽标', () => {
+await check('队列行上不再画隔离/可用徽标：那是按会话算的，一行一个模型答不了', () => {
   const badges = runtime.nodes.filter(
     (node) => typeof node.props.className === 'string' && node.props.className.startsWith('mf-badge'),
   )
-  assert.ok(badges.some((node) => node.props.className.includes('mf-bad')), '应有隔离徽标')
-  assert.ok(badges.some((node) => node.props.className.includes('mf-ok')), '应有可用徽标')
-  assert.ok(
-    badges.some((node) => String(node.props.title ?? '').includes('QUOTA')),
-    '隔离徽标应带着错误码，方便一眼看出是额度问题还是别的问题',
+  // 「隔离中」在甲会话成立、在乙会话不成立，摆在队列行上只会误导。剩下的徽标
+  // 只该是隔离名单每行右边的那个时间戳：数量与展开箭头对得上，且不带悬停说明
+  // （带 title 的正是被撤掉的那种「隔离中 / 已验证」徽标）。
+  const rowsWithStamp = runtime.nodes.filter(
+    (node) => node.tag === 'button' && node.props['aria-expanded'] !== undefined,
+  )
+  assert.equal(badges.length, rowsWithStamp.length, `徽标只该出现在名单行上，实际：${JSON.stringify(badges.map((node) => node.text))}`)
+  assert.equal(
+    badges.filter((node) => String(node.props.title ?? '') !== '').length,
+    0,
+    '队列徽标那种带悬停说明的徽标不该再有了',
   )
 })
 
@@ -960,16 +1044,7 @@ await check('同一个模型在三个会话里各撞一次：名单出三行，�
     await fresh.mount(sections[0].component({ close() {}, t }))
     const buttons = expanders(fresh)
     assert.equal(buttons.length, 3, '按「模型 + 会话」去重，三条都要露出来')
-    // 队列徽标要能看出「被几个会话隔离着」，不然「一处撞墙」和「处处撞墙」长得一样。
-    const badge = fresh.nodes.find(
-      (node) => node.props.className === 'mf-badge mf-bad' && String(node.text).includes('×3'),
-    )
-    assert.ok(badge !== undefined, `队列徽标应带 ×3，实际徽标：${JSON.stringify(fresh.nodes.filter((n) => String(n.props.className).includes('mf-badge')).map((n) => n.text))}`)
-    // 光有数字还不够：三个都是别人的会话时，当前会话照样能用它。
-    assert.ok(
-      String(badge.props.title).includes('sess-one') && String(badge.props.title).includes('sess-three'),
-      `徽标悬停要列出是哪几个会话撞的，实际：${badge.props.title}`,
-    )
+    // 队列行上不再画徽标了（那是按会话算的），但名单卡片必须一条不漏。
     // 只按模型去重的话这里会是一个 map，键撞在一起，只剩最后一条。
     const card = fresh.nodes.find((node) => node.props.className === 'mf-title' && node.text.startsWith('今日隔离名单'))
     assert.ok(card !== undefined, '名单卡片应当出现，且标题里的计数按「模型 + 会话」算')
@@ -1334,6 +1409,28 @@ await check('本机网络跳过补发的事件也有专属文案，带上原始 
   assert.ok(zh.evAutoContinueSkipped.includes('{code}'), '文案要留出 code 的插槽')
   assert.ok(zh.evAutoContinueSkipped.includes('网络'), '要让用户一眼看出是本机网络的问题')
   assert.ok(dictionaries.get('settings.modelFailover').en.evAutoContinueSkipped.length > 0, '英文文案不能缺')
+})
+
+await check('按会话解除隔离的事件写明是哪个会话，全局解除仍是老文案', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  state.events = [
+    { at: Date.now(), kind: 'reset', cleared: 2, sessionId: 'sess-a556ae8f', day: '2026-11-27' },
+    { at: Date.now() - 1000, kind: 'reset', cleared: 5, day: '2026-11-27' },
+  ]
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(state) })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(page(props)))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('evResetSession'), `带会话号的解除要走专属文案，实际：${flat.slice(-260)}`)
+  assert.ok(flat.includes('evReset'), '全局解除那条照旧')
+  const zh = dictionaries.get('settings.modelFailover').zh
+  assert.ok(zh.evResetSession.includes('{session}') && zh.evResetSession.includes('{count}'), '文案要留出会话号与条数')
+  assert.ok(dictionaries.get('settings.modelFailover').en.evResetSession.length > 0, '英文文案不能缺')
 })
 
 await check('清空事件日志走 /log/clear', async () => {
