@@ -588,6 +588,39 @@ window.__ModuleLoader__.load({
         return map
       }, [state])
 
+      /**
+       * 每个模型被几个会话隔离着。
+       *
+       * 队列徽标问的是「这个模型今天还能不能起头」。隔离按会话算，所以答案不是
+       * 简单的能 / 不能：它在甲会话里废了，在乙会话里照样能用。徽标上带个数字，
+       * 用户就知道那是「一个会话」还是「到处都撞墙」。
+       */
+      const stuckIn = useMemo(() => {
+        const counts = new Map()
+        for (const row of state?.quarantined ?? []) counts.set(row.key, (counts.get(row.key) ?? 0) + 1)
+        return counts
+      }, [state])
+
+      /**
+       * 名单卡片用的行：按「模型 + 会话」去重，而不是只按模型。
+       *
+       * 隔离是按会话算的，同一个模型可能在三个会话里各撞过一次 —— 只按模型
+       * 去重的话，页面只会显示其中一条（还是排序上最后的那个），另外两个会话
+       * 撞的墙就看不见了。徽标那边仍然按模型查（`quarantined`），因为「这个模型
+       * 今天能用吗」在队列里是按模型问的。
+       */
+      const quarantineRows = useMemo(() => {
+        const seen = new Set()
+        const rows = []
+        for (const row of state?.quarantined ?? []) {
+          const id = `${row.key}\u0000${row.sessionId ?? ''}`
+          if (seen.has(id)) continue
+          seen.add(id)
+          rows.push({ ...row, id })
+        }
+        return rows
+      }, [state])
+
       const good = useMemo(() => new Set((state?.good ?? []).map((row) => row.key)), [state])
 
       /** 已接入但还没进队列的模型，按 provider 分组给下拉框用。 */
@@ -740,7 +773,9 @@ window.__ModuleLoader__.load({
             ),
             div({ className: 'mf-kv' },
               span({ className: 'mf-note' }, t('quarantineCount')),
-              h('b', null, String(quarantined.size)),
+              // 按「模型 + 会话」数：隔离是按会话算的，同一个模型在两个会话里
+              // 各撞一次，这里就是 2 —— 跟下面那张名单的行数对得上。
+              h('b', null, String(quarantineRows.length)),
             ),
           ),
           notice !== '' && error === '' ? div({ className: 'mf-note' }, notice) : null,
@@ -804,7 +839,14 @@ window.__ModuleLoader__.load({
                           )),
                         )),
                 bad !== undefined
-                  ? span({ className: 'mf-badge mf-bad', title: `${bad.code ?? ''} ${bad.message ?? ''}`.trim() }, t('refQuarantine'))
+                  ? span({
+                      className: 'mf-badge mf-bad',
+                      // 隔离按会话算：徽标上带数字，才知道是「就一个会话」还是
+                      // 「哪个会话都撞墙」。文字仍是「隔离中」，数字只是附加。
+                      title: `${bad.code ?? ''} ${bad.message ?? ''}`.trim(),
+                    },
+                      (stuckIn.get(key) ?? 1) > 1 ? `${t('refQuarantine')} ×${stuckIn.get(key)}` : t('refQuarantine'),
+                    )
                   : (isGood ? span({ className: 'mf-badge mf-ok' }, t('refGood')) : null),
                 div({ className: 'mf-actions' },
                   h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveUp'), disabled: busy || index === 0, onClick: () => move(index, -1) }, '↑'),
@@ -831,11 +873,11 @@ window.__ModuleLoader__.load({
         ),
 
         // ── 今日隔离名单 ────────────────────────────────────────────────────
-        quarantined.size > 0
-          ? Card({ title: `${t('quarantined')} (${quarantined.size})` },
+        quarantineRows.length > 0
+          ? Card({ title: `${t('quarantined')} (${quarantineRows.length})` },
               div({ className: 'mf-note' }, t('quarantinedHint')),
-              ...[...quarantined.values()].map((row) => h(QuarantineRow, {
-                key: row.key,
+              ...quarantineRows.map((row) => h(QuarantineRow, {
+                key: row.id,
                 row,
                 t,
                 now,

@@ -941,6 +941,43 @@ await check('设置页的隔离摘要用真字典渲染时，会话号前缀真�
   }
 })
 
+await check('同一个模型在三个会话里各撞一次：名单出三行，一行一个会话', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const many = initialState()
+  many.quarantined = ['sess-one', 'sess-two', 'sess-three'].map((sessionId, index) => ({
+    key: KEY('gamma', 'two'),
+    provider: 'gamma',
+    model: 'two',
+    code: 'TRANSPORT',
+    message: `会话 ${sessionId} 撞的墙`,
+    at: at - (3 - index) * 1000,
+    label: 'FutureHub · Gamma Two',
+    sessionId,
+  }))
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(many) })
+  try {
+    await fresh.mount(sections[0].component({ close() {}, t }))
+    const buttons = expanders(fresh)
+    assert.equal(buttons.length, 3, '按「模型 + 会话」去重，三条都要露出来')
+    // 队列徽标要能看出「被几个会话隔离着」，不然「一处撞墙」和「处处撞墙」长得一样。
+    const badge = fresh.nodes.find(
+      (node) => node.props.className === 'mf-badge mf-bad' && String(node.text).includes('×3'),
+    )
+    assert.ok(badge !== undefined, `队列徽标应带 ×3，实际徽标：${JSON.stringify(fresh.nodes.filter((n) => String(n.props.className).includes('mf-badge')).map((n) => n.text))}`)
+    // 只按模型去重的话这里会是一个 map，键撞在一起，只剩最后一条。
+    const card = fresh.nodes.find((node) => node.props.className === 'mf-title' && node.text.startsWith('今日隔离名单'))
+    assert.ok(card !== undefined, '名单卡片应当出现，且标题里的计数按「模型 + 会话」算')
+    assert.ok(card.text.includes('(3)'), `卡片标题应写 3 条，实际：${card.text}`)
+    const flat = fresh.text(await fresh.mount(sections[0].component({ close() {}, t })))
+    for (const id of ['sess-one', 'sess-two', 'sess-three']) {
+      assert.ok(flat.includes(id.slice(0, 8)), `${id} 应该各占一行`)
+    }
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
 await check('再点一下箭头就收回去，详情块整个消失', async () => {
   await expanders()[1].props.onClick()
   await runtime.mount(page(props))
