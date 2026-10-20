@@ -308,6 +308,48 @@ export function apply(ctx, _config) {
     })
 
   // ── 设置页 API ────────────────────────────────────────────────────────────
+  /**
+   * 每个会话今天的隔离情况 + 正在用哪个模型。
+   *
+   * 两种来源拼起来：隔离名单知道「哪些会话撞过墙」，便签知道「哪些会话跑过」。
+   * 只查前者会漏掉一切正常的会话，只查后者会漏掉刚隔离、还没跑完的会话。
+   */
+  const sessionRows = (now) => {
+    const settings = settingsFile.get()
+    const view = health.view(now, settings.resetHour)
+    const decorate = (row) => ({ ...row, ...splitKey(row.key), label: labelOf(row.provider, row.model) })
+    const table = new Map()
+    const rowOf = (sessionId) => {
+      let row = table.get(sessionId)
+      if (row === undefined) {
+        row = { sessionId, quarantined: [], good: [], active: undefined }
+        table.set(sessionId, row)
+      }
+      return row
+    }
+    for (const group of view.sessions) {
+      const row = rowOf(group.sessionId)
+      row.quarantined = group.quarantined.map(decorate)
+      row.good = group.good.map(decorate)
+    }
+    for (const [sessionId, hit] of notes.entries()) {
+      rowOf(sessionId).active = {
+        provider: hit.provider,
+        model: hit.model,
+        at: hit.at,
+        label: labelOf(hit.provider, hit.model),
+      }
+    }
+    // 有事的会话排前面：隔离着的 → 正在跑的 → 其余。
+    return [...table.values()].sort((left, right) => {
+      const weight = (row) => (row.quarantined.length > 0 ? 0 : row.active !== undefined ? 1 : 2)
+      const delta = weight(left) - weight(right)
+      if (delta !== 0) return delta
+      const at = (row) => row.quarantined.at(-1)?.at ?? row.active?.at ?? 0
+      return at(right) - at(left)
+    })
+  }
+
   const snapshot = (now) => {
     const settings = settingsFile.get()
     const view = health.view(now, settings.resetHour)
@@ -335,6 +377,7 @@ export function apply(ctx, _config) {
       catalogScannedAt: catalog.at,
       quarantined: view.quarantined.map(decorate),
       good: view.good.map(decorate),
+      sessions: sessionRows(now),
       events: logFile.get().events.slice(-EVENTS_IN_SNAPSHOT).reverse(),
       dataDir: dir,
     }
@@ -422,6 +465,20 @@ export function apply(ctx, _config) {
           label: labelOf(row.provider, row.model),
         }))
         sendJson(res, 200, { ok: true, notes: rows })
+        return
+      }
+
+      // 会话页那一栏专用：全机器所有会话的隔离与当前模型，不带模型清单和事件。
+      //
+      // 和 /notes 一样，是为了不把整份 /state 拖到一个每几秒刷新一次的页面上。
+      if (method === 'GET' && path === '/sessions') {
+        sendJson(res, 200, {
+          ok: true,
+          now,
+          day: health.view(now, settingsFile.get().resetHour).day,
+          route: { provider: ROUTE, model: MODEL_ID, label: ROUTE_LABEL },
+          sessions: sessionRows(now),
+        })
         return
       }
 

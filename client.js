@@ -82,6 +82,24 @@ window.__ModuleLoader__.load({
 .mf-event-time { flex: none; opacity: .5; font-variant-numeric: tabular-nums; }
 .mf-empty { opacity: .55; font-size: 12px; padding: 4px 0; }
 .mf-tail { font-size: 11.5px; line-height: 1.5; opacity: .55; padding: 2px 0 0; user-select: none; }
+/* 会话页那一栏（conversation.view 的一条）。它占满整个视图区域，所以自己带内边距
+   和滚动，而不是套用设置页那种「一列卡片」的紧凑布局。 */
+.mf-qv { display: flex; flex-direction: column; gap: 12px; padding: 16px 20px; font-size: 13px; line-height: 1.6; color: inherit; overflow: auto; height: 100%; box-sizing: border-box; }
+.mf-qv-head { display: flex; align-items: center; gap: 10px; }
+.mf-qv-head > .mf-title { flex: 1; font-size: 14px; }
+.mf-qv-session { border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.mf-qv-session.mf-mine { border-color: color-mix(in srgb, #30a46c 45%, transparent); }
+.mf-qv-top { display: flex; align-items: baseline; gap: 8px; }
+.mf-qv-title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mf-qv-id { flex: none; opacity: .45; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mf-qv-line { display: flex; align-items: baseline; gap: 8px; }
+.mf-qv-label { flex: none; width: 4.5em; opacity: .55; font-size: 11.5px; }
+.mf-qv-value { flex: 1; min-width: 0; word-break: break-word; }
+.mf-qv-list { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.mf-qv-item { display: inline-flex; align-items: baseline; gap: 6px; padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); font-size: 11.5px; }
+.mf-qv-item.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
+.mf-qv-item.mf-ok { border-color: color-mix(in srgb, #30a46c 55%, transparent); color: #30a46c; }
+.mf-qv-item > .mf-qv-code { opacity: .65; }
 /* 隔离名单的一行：主行 +（展开时）下面的报错详情。单开一层是为了不动 .mf-row 的
    单行布局 —— 里面塞不下会换行的正文。 */
 .mf-qrow { display: flex; flex-direction: column; }
@@ -121,7 +139,7 @@ window.__ModuleLoader__.load({
         add: '添加',
         noModels: '没有扫到可用的模型。',
         quarantined: '今日隔离名单',
-        quarantinedHint: '这些模型今天不再被用来起头；解除后立即可用。点左边的箭头看完整报错。',
+        quarantinedHint: '这些模型今天不再被用来起头；解除后立即可用。隔离按会话算，所以同一个模型可能挂在不同的会话名下。点左边的箭头看完整报错。',
         clearQuarantine: '解除今日隔离',
         attempts: '尝试次数',
         expand: '展开报错详情',
@@ -132,6 +150,9 @@ window.__ModuleLoader__.load({
         detailAt: '判定时间',
         detailMessage: '报错原文',
         detailNoMessage: '宿主没有留下报错文本。',
+        detailSession: '所属会话',
+        detailNoSession: '不分会话（压缩上下文、后台任务）',
+        rowSession: '会话 {id}…',
         relay: '模型异常',
         relayHint:
           '开着的时候，队列里的模型会一直在后台自动接力：一个产不出东西就换下一个，直到有人把这一轮做完。',
@@ -186,6 +207,21 @@ window.__ModuleLoader__.load({
         evReset: '手动解除隔离，清了 {count} 个',
         evForget: '重置了今天的运行状态',
         tailModel: '本轮：{label}',
+        viewQuarantine: '隔离队列',
+        qvHint:
+          '隔离是「按会话」算的：某个模型在哪个会话里撞了墙，就只在那个会话里被跳过，别的会话照常用它。下面按会话列出正在使用的模型和已经被隔离的模型。',
+        qvRefresh: '刷新',
+        qvLoading: '读取中…',
+        qvFailed: '读取失败：{message}',
+        qvEmpty: '还没有任何会话跑过。',
+        qvNoProblem: '这个会话今天没有出过问题的模型。',
+        qvActive: '正在用',
+        qvQuarantined: '已隔离',
+        qvQueued: '已验证',
+        qvCurrent: '当前会话',
+        qvUnnamed: '未命名会话',
+        qvUnscoped: '后台任务（不挂在任何会话下）',
+        qvDay: '当前逻辑日 {day}',
       },
       en: {
         nav: 'Model Relay',
@@ -215,7 +251,7 @@ window.__ModuleLoader__.load({
         add: 'Add',
         noModels: 'No models were discovered.',
         quarantined: 'Quarantined today',
-        quarantinedHint: 'These models will not start a task today. Clearing makes them usable immediately. Use the arrow at left to see the full error.',
+        quarantinedHint: 'These models will not start a task today. Clearing makes them usable immediately. Quarantine is per conversation, so the same model can appear under several conversations. Use the arrow at left to see the full error.',
         clearQuarantine: 'Clear today’s quarantine',
         attempts: 'attempts',
         expand: 'Show the full error',
@@ -226,6 +262,9 @@ window.__ModuleLoader__.load({
         detailAt: 'Recorded',
         detailMessage: 'Raw error',
         detailNoMessage: 'The host recorded no error text.',
+        detailSession: 'Conversation',
+        detailNoSession: 'Not tied to a conversation (compaction, background work)',
+        rowSession: 'Conversation {id}…',
         relay: 'Model anomalies',
         relayHint:
           'While this is on, the queued models keep relaying in the background: one produces nothing and the next takes over, until someone finishes the turn.',
@@ -280,6 +319,21 @@ window.__ModuleLoader__.load({
         evReset: 'Quarantine cleared by hand — {count} released',
         evForget: 'Today’s runtime state was reset',
         tailModel: 'Turn: {label}',
+        viewQuarantine: 'Quarantine',
+        qvHint:
+          'Quarantine is per conversation: a model that failed inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined.',
+        qvRefresh: 'Refresh',
+        qvLoading: 'Loading…',
+        qvFailed: 'Could not load: {message}',
+        qvEmpty: 'No conversation has run anything yet.',
+        qvNoProblem: 'No model has failed in this conversation today.',
+        qvActive: 'In use',
+        qvQuarantined: 'Quarantined',
+        qvQueued: 'Verified',
+        qvCurrent: 'This conversation',
+        qvUnnamed: 'Untitled conversation',
+        qvUnscoped: 'Background work (not tied to a conversation)',
+        qvDay: 'Logical day {day}',
       },
     }
 
@@ -322,6 +376,7 @@ window.__ModuleLoader__.load({
     }
 
     const getState = () => api('/state')
+    const getSessions = () => api('/sessions')
     const post = (path, body) => api(path, { method: 'POST', body: body ?? {} })
 
     // ── 小工具 ──────────────────────────────────────────────────────────────
@@ -430,6 +485,9 @@ window.__ModuleLoader__.load({
         { key: 'detailRoute', value: `${row.provider ?? '?'} / ${row.model ?? '?'}` },
         { key: 'detailAttempts', value: String(row.attempts ?? 1) },
         { key: 'detailAt', value: stamp(at) },
+        // 隔离按会话算，所以「这是哪个会话撞的」是这个名单里最关键的一条信息：
+        // 同一张表里同一个模型可能出现好几次，各挂在不同会话名下。
+        { key: 'detailSession', value: row.sessionId === undefined || row.sessionId === '' ? t('detailNoSession') : row.sessionId },
       ].filter((item) => item.value !== '')
       return div({ className: 'mf-qrow' },
         div({ className: 'mf-row' },
@@ -447,6 +505,9 @@ window.__ModuleLoader__.load({
                 .filter((part) => part !== '' && part !== undefined)
                 .join(' · '),
             ),
+            row.sessionId === undefined || row.sessionId === ''
+              ? null
+              : div({ className: 'mf-sub' }, t('rowSession', { id: row.sessionId.slice(0, 8) })),
           ),
           span({ className: 'mf-badge mf-bad' }, stamp(at)),
         ),
@@ -1029,6 +1090,166 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'mf-tail' }, t('tailModel', { label }))
     }
 
+    // ── 会话页顶部的「隔离队列」一栏 ────────────────────────────────────────
+    /**
+     * 这一栏自己的刷新周期。
+     *
+     * 15000 是个折中：换模型、被隔离都是「几秒内就该看见」的事，但这一栏通常
+     * 只是挂在那里没人看，问得太勤纯属浪费。手动点「刷新」随时能立刻拉一次。
+     */
+    const QV_POLL_MS = 15000
+
+    /**
+     * 某个模型的显示名。`/sessions` 已经把 `label` 拼好了，这里只兜底。
+     */
+    function sessionItemLabel(item) {
+      if (typeof item?.label === 'string' && item.label !== '') return item.label
+      if (typeof item?.provider === 'string' && typeof item?.model === 'string') {
+        return `${item.provider} / ${item.model}`
+      }
+      return '?'
+    }
+
+    /** 会话号太长了，列表里只留前 8 位。 */
+    function shortId(sessionId) {
+      return typeof sessionId === 'string' && sessionId.length > 8 ? sessionId.slice(0, 8) : String(sessionId ?? '')
+    }
+
+    /**
+     * 一栏里的一行会话。
+     *
+     * `useSessions` 由宿主以标准 hook 属性注入（dsh-client-ui-session 的
+     * `provideRoot({ hooks: { sessions: ctx.sessions.list } })`），拿它换会话标题；
+     * 拿不到时退回会话号前缀 —— 这一栏是给人看「哪个会话出事了」，标题只是
+     * 帮助识别，缺了也不能空白。
+     */
+    function SessionQueueRow({ row, mine, title, t }) {
+      const quarantined = row?.quarantined ?? []
+      const good = row?.good ?? []
+      const active = row?.active
+      return div({ className: mine ? 'mf-qv-session mf-mine' : 'mf-qv-session' },
+        div({ className: 'mf-qv-top' },
+          span({ className: 'mf-qv-title' }, title === undefined || title === '' ? t('qvUnnamed') : title),
+          mine ? span({ className: 'mf-badge mf-ok' }, t('qvCurrent')) : null,
+          span({ className: 'mf-qv-id' }, shortId(row?.sessionId)),
+        ),
+        div({ className: 'mf-qv-line' },
+          span({ className: 'mf-qv-label' }, t('qvActive')),
+          span({ className: 'mf-qv-value' }, active === undefined ? t('none') : sessionItemLabel(active)),
+        ),
+        div({ className: 'mf-qv-line' },
+          span({ className: 'mf-qv-label' }, t('qvQuarantined')),
+          quarantined.length === 0
+            ? span({ className: 'mf-qv-value' }, t('qvNoProblem'))
+            : div({ className: 'mf-qv-list' },
+                ...quarantined.map((item) => h('span', {
+                  className: 'mf-qv-item mf-bad',
+                  key: item.key,
+                  title: String(item.message ?? ''),
+                },
+                  span(null, sessionItemLabel(item)),
+                  span({ className: 'mf-qv-code' }, ` · ${codeText(item.code) || String(item.code ?? '?')} · ${stamp(item.at)}`),
+                )),
+              ),
+        ),
+        good.length === 0
+          ? null
+          : div({ className: 'mf-qv-line' },
+              span({ className: 'mf-qv-label' }, t('qvQueued')),
+              div({ className: 'mf-qv-list' },
+                ...good.map((item) => h('span', { className: 'mf-qv-item mf-ok', key: item.key }, sessionItemLabel(item))),
+              ),
+            ),
+      )
+    }
+
+    /**
+     * 会话页顶部的「隔离队列」栏。
+     *
+     * 为什么单独注册一条 `conversation.view` 而不是塞进设置页：会话页顶部那排
+     * tab 就是 `slots.entries("conversation.view")` 枚举出来的（见
+     * dsh-client-ui-conversation 的 `viewTabs()`），注册一条就自然多一栏。
+     * 它的作用域是 session，所以 props 里一定有当前会话号，用来把「当前会话」
+     * 那一行标出来。
+     *
+     * 数据走自己的 `/sessions` 路由而不是 `/state`：这一栏只关心隔离与当前模型，
+     * 每几秒刷新一次，拖整份模型清单和几十条事件不划算。
+     */
+    function SessionQueue(props) {
+      const t = props.t
+      const mineId = props.sessionId
+      const [data, setData] = useState(null)
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const alive = useRef(true)
+      // 宿主没注入这个 hook 也照常工作，只是标题退化成会话号。
+      const useSessions = typeof props.useSessions === 'function' ? props.useSessions : () => undefined
+      const byId = useSessions((snapshot) => snapshot?.byId)
+
+      const load = useCallback(async (manual) => {
+        if (manual === true) setBusy(true)
+        try {
+          const next = await getSessions()
+          if (!alive.current) return
+          setData(next)
+          setError('')
+        } catch (failure) {
+          // 拉不到就保留上一份：网络抖一下不该让整栏变成报错墙。
+          if (!alive.current) return
+          if (manual === true) setError(String(failure?.message ?? failure))
+        } finally {
+          if (alive.current && manual === true) setBusy(false)
+        }
+      }, [])
+
+      useEffect(() => {
+        alive.current = true
+        void load(true)
+        // 会话在跑的时候这一栏要跟着变（换模型、被隔离），所以自己轮询。
+        const timer = setInterval(() => { void load(false) }, QV_POLL_MS)
+        return () => {
+          alive.current = false
+          clearInterval(timer)
+        }
+      }, [load])
+
+      const rows = Array.isArray(data?.sessions) ? data.sessions : []
+      const titleOf = (sessionId) => {
+        // 空串是「不分会话」那一桶：压缩上下文、后台任务、离线测试都落在那里。
+        // 它不是某个会话，套一个「未命名会话」会让人以为有这么个对话。
+        if (sessionId === '') return t('qvUnscoped')
+        const hit = byId?.[sessionId]
+        /* 会话标题由宿主给；拿不到就退回会话号前缀。 */
+        return typeof hit?.displayTitle === 'string' && hit.displayTitle !== '' ? hit.displayTitle : undefined
+      }
+
+      return div({ className: 'mf-qv' },
+        div({ className: 'mf-qv-head' },
+          div({ className: 'mf-title' }, t('viewQuarantine')),
+          data?.day ? span({ className: 'mf-note' }, t('qvDay', { day: data.day })) : null,
+          h('button', {
+            type: 'button',
+            className: 'mf-btn',
+            disabled: busy,
+            onClick: () => void load(true),
+          }, busy ? t('busy') : t('qvRefresh')),
+        ),
+        div({ className: 'mf-note' }, t('qvHint')),
+        error !== '' ? div({ className: 'mf-err' }, t('qvFailed', { message: error })) : null,
+        data === null
+          ? div({ className: 'mf-empty' }, t('qvLoading'))
+          : rows.length === 0
+            ? div({ className: 'mf-empty' }, t('qvEmpty'))
+            : rows.map((row) => h(SessionQueueRow, {
+                key: row.sessionId === '' ? '(none)' : row.sessionId,
+                row,
+                mine: row.sessionId === mineId,
+                title: titleOf(row.sessionId),
+                t,
+              })),
+      )
+    }
+
     // ── 挂载 ────────────────────────────────────────────────────────────────
     /**
      * @param {any} ctx - 客户端 cordis 上下文。
@@ -1066,6 +1287,20 @@ window.__ModuleLoader__.load({
         order: 20,
         locale: NS,
       }, (props) => h(RelayTail, { ...props, t: props?.t ?? t })))
+
+      // 会话页顶部多一栏「隔离队列」。这排 tab 是宿主按
+      // `slots.entries("conversation.view")` 枚举出来的（chat 是 order 0、
+      // 详情是 10），我们把 order 放到 20，排在它们右边。
+      //
+      // 不声明 children：这一栏自己不往外开子插槽，而 `conversation.view`
+      // 的子槽位归宿主和 chat 所有，重复声明会直接抛错。
+      ctx.slots.inject('conversation.view', () => ctx.slots.register({
+        name: 'conversation.view',
+        id: 'model-failover:quarantine',
+        order: 20,
+        label: () => t('viewQuarantine'),
+        locale: NS,
+      }, (props) => h(SessionQueue, { ...props, t: props?.t ?? t })))
     }
 
     exports.apply = apply

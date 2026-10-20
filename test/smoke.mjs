@@ -430,7 +430,58 @@ await check('失败一次、补一句「继续」就写完：不隔离，并记�
   assert.deepEqual(view.good.map((row) => row.key), [routeKey('alpha', 'one')], '应该记成当天已验证可用')
 })
 
-// 5b · 撞输出上限不等于「这个模型坏了」
+// 5d · 隔离按会话算：甲会话撞的墙，不该让乙会话跟着绕开
+await check('隔离按会话分开：甲会话撞的墙，乙会话照样从队首开始', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), quota()],
+      [routeKey('beta', 'one'), ok('乙会话的答案')],
+    ]),
+  })
+
+  // 甲会话：alpha 撞墙 → 隔离 → 换到 beta。
+  const first = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], sessionId: 'sess-a' }))
+  assert.equal(textOf(first), '乙会话的答案')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('beta', 'one')])
+
+  // 乙会话：alpha 在甲那边坏了，但这边照旧从它开始试。
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], sessionId: 'sess-b' }))
+  assert.equal(commands(h.llm)[0], routeKey('alpha', 'one'), '别的会话不该被甲的隔离牵连')
+
+  // 甲会话的下一个任务：alpha 被跳过。
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], sessionId: 'sess-a' }))
+  assert.deepEqual(commands(h.llm), [routeKey('beta', 'one')], '自己的会话里它仍然是被隔离的')
+
+  const view = h.health.view(h.clock.ms, 1)
+  assert.deepEqual(view.sessions.map((row) => row.sessionId).sort(), ['sess-a', 'sess-b'])
+  const mine = view.sessions.find((row) => row.sessionId === 'sess-a')
+  assert.deepEqual(mine.quarantined.map((row) => row.key), [routeKey('alpha', 'one')], '隔离挂在甲会话名下')
+  assert.equal(mine.quarantined[0].sessionId, 'sess-a', '平铺列表里也要带会话号')
+})
+
+// 5e · 没有 sessionId 的调用（压缩、离线测试）落在同一桶里，互不影响真实的会话
+await check('隔离：没有 sessionId 的调用自成一桶，不污染任何会话', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    scripts: new Map([
+      [routeKey('alpha', 'one'), quota()],
+      [routeKey('beta', 'one'), ok('兜底')],
+    ]),
+  })
+
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  const view = h.health.view(h.clock.ms, 1)
+  assert.deepEqual(view.sessions.map((row) => row.sessionId), [''])
+
+  // 真有会话号的下一个任务：不该看到那一桶里的隔离。
+  h.llm.calls.length = 0
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], sessionId: 'sess-real' }))
+  assert.equal(commands(h.llm)[0], routeKey('alpha', 'one'), '不分会话那一桶不该牵连真实会话')
+})
+
 await check('撞输出上限、一个字都没吐：原样交出 max-tokens，且**不隔离**', async () => {
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
@@ -1081,6 +1132,43 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     // 隔离名单 + 解除
     const quarantined = await call('POST', '/api/dsh-model-failover/reset', {})
     assert.equal(quarantined.json.quarantined.length, 0)
+
+    // ── 会话页那一栏的轻量端点 ──────────────────────────────────────────────
+    // 它只回隔离与当前模型，不该拖模型清单和事件下来：那一栏是轮询的。
+    const sessions = await call('GET', '/api/dsh-model-failover/sessions')
+    assert.equal(sessions.status, 200)
+    assert.equal(sessions.json.ok, true)
+    assert.equal(sessions.json.route.provider, ROUTE)
+    assert.ok(Array.isArray(sessions.json.sessions), '必须有 sessions 数组')
+    assert.equal('catalog' in sessions.json, false, '不该带上模型清单')
+    assert.equal('events' in sessions.json, false, '不该带上事件日志')
+    assert.equal(typeof sessions.json.day, 'string', '要带上当前逻辑日')
+
+    // 现在还没跑过任何东西，所以是空的；跑一轮之后要能看到「正在用谁」。
+    assert.equal(sessions.json.sessions.length, 0, '还没跑过时应该是空的')
+    for await (const _ of registrations[0].adapter.stream({
+      provider: ROUTE,
+      model: 'auto',
+      messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+      sessionId: 'sess-queue',
+    })) { /* 把流跑完 */ }
+
+    const after = await call('GET', '/api/dsh-model-failover/sessions')
+    const mine = after.json.sessions.find((row) => row.sessionId === 'sess-queue')
+    assert.ok(mine !== undefined, `跑过之后应出现这个会话：${JSON.stringify(after.json.sessions)}`)
+    assert.equal(mine.active.provider, 'alpha', '应记下这个会话最后用的模型')
+    assert.equal(mine.active.model, 'one')
+    assert.equal(typeof mine.active.label, 'string', '宿主把显示名拼好给前端')
+    // 队列上面刚被改成 beta 在前，而 beta 只注册在清单里、没有脚本 -> NO_ADAPTER，
+    // 所以这一轮确实在 beta 上撞过一次。榜单要把它挂在 sess-queue 名下。
+    const stuck = mine.quarantined.find((row) => row.key === routeKey('beta', 'one'))
+    assert.ok(stuck !== undefined, `sess-queue 名下应有 beta/one：${JSON.stringify(mine.quarantined)}`)
+    assert.equal(stuck.sessionId, 'sess-queue', '每一行都要带会话号')
+    assert.equal(typeof stuck.label, 'string')
+
+    // 换个会话问：那份隔离不该出现在别人名下。
+    const other = await call('GET', '/api/dsh-model-failover/sessions')
+    assert.equal(other.json.sessions.filter((row) => row.sessionId === 'sess-queue').length, 1, '同一会话只出现一次')
 
     const unknown = await call('GET', '/api/dsh-model-failover/nope')
     assert.equal(unknown.status, 404)

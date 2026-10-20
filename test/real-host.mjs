@@ -196,8 +196,17 @@ async function boot(spec) {
         finish: chunks.at(-1),
       }
     },
+    /**
+     * 读落盘的隔离状态。
+     *
+     * 真正的文件形状是 `{ day, sessions: { [sessionId]: { quarantine, good } } }`
+     * —— 隔离按会话分开记。这里所有 `stream()` 都没传 `sessionId`，所以全部落在
+     * 空串那一桶；摊平返回它，断言就能照旧写 `state.quarantine[...]`。
+     */
     state() {
-      return JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8'))
+      const raw = JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8'))
+      const bucket = raw?.sessions?.[''] ?? { quarantine: {}, good: {} }
+      return { day: raw?.day, quarantine: bucket.quarantine, good: bucket.good, sessions: raw?.sessions }
     },
     dispose() {
       if (previous === undefined) delete process.env.DSH_HOME

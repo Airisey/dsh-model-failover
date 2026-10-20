@@ -330,8 +330,9 @@ const initialState = () => ({
   catalogScannedAt: at,
   quarantined: [
     // 宿主 view() 按判定时间升序排，这里也照这个顺序摆。
-    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at: at - 90_000, label: 'Code99 · Beta One' },
-    { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'TRANSPORT', message: LONG_ERROR, at: at - 60_000, label: 'FutureHub · Gamma Two' },
+    // 隔离按会话算，所以两行挂在不同会话名下 —— 这也是设置页名单的常态。
+    { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at: at - 90_000, label: 'Code99 · Beta One', sessionId: 'sess-alpha' },
+    { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'TRANSPORT', message: LONG_ERROR, at: at - 60_000, label: 'FutureHub · Gamma Two', sessionId: 'sess-long-name' },
   ],
   good: [{ key: KEY('alpha', 'one'), at, provider: 'alpha', model: 'one', label: '硅基流动 · Alpha One' }],
   events: [
@@ -466,7 +467,7 @@ await check('apply() 注册中英字典、注入样式表、插一条 settings.s
   assert.equal(styleSheets.length, 1, '应注入一张样式表')
   assert.equal(styleSheets[0].textContent.includes('.mf-root'), true)
 
-  assert.equal(sections.length, 2, '设置页一条 + 轮尾小字一条')
+  assert.equal(sections.length, 3, '设置页一条 + 轮尾小字一条 + 会话页隔离队列一条')
   assert.equal(sections[0].slot, 'settings.section')
   assert.equal(sections[0].definition.name, 'settings.section')
   assert.equal(sections[0].definition.id, 'model-failover')
@@ -488,6 +489,20 @@ await check('apply() 注册中英字典、注入样式表、插一条 settings.s
   assert.equal(typeof sections[1].component, 'function')
 
   assert.equal(typeof dict.zh.tailModel, 'string', '轮尾小字要有中文文案')
+
+  // 第三条是会话页顶部的「隔离队列」。它是 conversation.view 的一条，宿主靠
+  // 枚举这个槽位生成顶部 tab，所以 label 必须有 —— 没有 label 的条目会被跳过，
+  // 那一栏就不会出现。
+  assert.equal(sections[2].slot, 'conversation.view')
+  assert.equal(sections[2].definition.name, 'conversation.view')
+  assert.equal(sections[2].definition.id, 'model-failover:quarantine')
+  assert.equal(typeof sections[2].definition.order, 'number')
+  assert.ok(sections[2].definition.order > 10, '排在 chat(0) 与详情(10) 右边')
+  assert.equal(sections[2].definition.locale, 'settings.modelFailover')
+  assert.equal(typeof sections[2].definition.label, 'function')
+  assert.equal(typeof sections[2].definition.label(), 'string')
+  assert.equal(sections[2].definition.children, undefined, '不重复声明宿主的子插槽')
+  assert.equal(typeof sections[2].component, 'function')
 })
 
 // ── 轮尾小字（conversation.chat.turnTail 里的那一条） ────────────────────────
@@ -579,6 +594,187 @@ await check('轮尾小字：3 秒 TTL 内不重复问，换一个轮号才会再
     assert.equal(asked.length, 2, '换轮号说明缓存里没有，得再问一次')
     await fresh.mount(tail({ sessionId: 's-cache', turn: 3, t }))
     assert.equal(asked.length, 2, '回到已经问过的轮号，TTL 内不该再问')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+// ── 会话页顶部的「隔离队列」一栏（conversation.view 里的那一条） ─────────────
+
+const queue = sections[2].component
+
+/** `/sessions` 的假后端。 */
+const sessionsPayload = (sessions, day = '2026-11-27') => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({
+    ok: true,
+    now: at,
+    day,
+    route: { provider: 'model-failover', model: 'auto', label: '模型接力' },
+    sessions,
+  }),
+})
+
+const sessionRow = (overrides) => ({
+  sessionId: 's-alpha',
+  quarantined: [],
+  good: [],
+  active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' },
+  ...overrides,
+})
+
+await check('隔离队列：注册成 conversation.view，排在 chat 与详情右边，标题走字典', () => {
+  const definition = sections[2].definition
+  assert.equal(definition.name, 'conversation.view')
+  assert.equal(definition.id, 'model-failover:quarantine')
+  assert.ok(definition.order > 10, `要排在详情(10)后面，实际是 ${definition.order}`)
+  assert.equal(typeof definition.label, 'function')
+  assert.equal(definition.label(), '隔离队列')
+  assert.equal(typeof dictZh.viewQuarantine, 'string')
+  assert.equal(typeof dictionaries.get('settings.modelFailover').en.viewQuarantine, 'string')
+})
+
+await check('隔离队列：问的是轻量 /sessions，按会话列出「正在用」与「已隔离」', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    asked.push(String(url))
+    return sessionsPayload([
+      sessionRow({
+        sessionId: 's-alpha',
+        quarantined: [
+          { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at: at - 90_000, label: 'Code99 · Beta One', sessionId: 's-alpha' },
+        ],
+        good: [{ key: KEY('alpha', 'one'), provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One', sessionId: 's-alpha' }],
+      }),
+      sessionRow({ sessionId: 's-beta', active: { provider: 'gamma', model: 'two', at, label: 'FutureHub · Gamma Two' } }),
+    ])
+  }
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-other', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+
+  assert.equal(asked.length >= 1, true, '至少要问一次')
+  assert.ok(asked[0].includes('/api/dsh-model-failover/sessions'), `应问 /sessions，实际是：${asked[0]}`)
+  assert.equal(asked.some((url) => url.includes('/state')), false, '不该为这一栏拉整份状态')
+
+  assert.ok(flat.includes('隔离队列'), '标题要在')
+  assert.ok(flat.includes('正在用'), '要有「正在用」一栏')
+  assert.ok(flat.includes('已隔离'), '要有「已隔离」一栏')
+  // 第一个会话：用 alpha/one，隔离了 beta/one。
+  assert.ok(flat.includes('硅基流动 · Alpha One'), '应列出这个会话正在用的模型')
+  assert.ok(flat.includes('Code99 · Beta One'), '应列出被隔离的模型')
+  assert.ok(flat.includes('额度/余额耗尽'), '隔离项要带人话错误码')
+  // 报错原文挂在 title 上（悬停才看得见），不在纯文本里 —— 从节点上断言。
+  const titled = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-qv-item mf-bad'))
+  assert.equal(titled.length, 1, '隔离项渲染成一个红色胶囊')
+  assert.equal(titled[0].props.title, '余额不足')
+  // 第二个会话：没有隔离，只显示一句「没有出过问题」。
+  assert.ok(flat.includes('FutureHub · Gamma Two'), '第二个会话有它自己的当前模型')
+  assert.ok(flat.includes('今天没有出过问题的模型'), '没有隔离时说清楚')
+})
+
+await check('隔离队列：当前会话那一行有标记，别的会话没有', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine' }),
+    sessionRow({ sessionId: 's-other', active: { provider: 'beta', model: 'one', at, label: 'Code99 · Beta One' } }),
+  ])
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    const badges = fresh.nodes.filter((node) => node.props?.className === 'mf-badge mf-ok')
+    assert.equal(badges.length, 1, '只有当前会话那一行该带标记')
+    assert.equal(badges[0].text, '当前会话')
+    const mine = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-mine'))
+    assert.equal(mine.length, 1, '当前会话那一行应换上高亮描边')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('隔离队列：会话标题取自宿主，宿主没给就退回会话号前缀', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-titled' }),
+    sessionRow({ sessionId: 's-untitled', active: undefined }),
+  ])
+  // 宿主注入的 hook：按 selector 读会话表。
+  const useSessions = (select) => select({ byId: { 's-titled': { id: 's-titled', displayTitle: '排障会话' } } })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-titled', useSessions, t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('排障会话'), '有标题就用标题')
+  // 会话号前缀始终作为副标题留着：标题可能重名，号才是唯一的。
+  assert.ok(flat.includes('s-titled'.slice(0, 8)), '会话号前缀作为副标题保留')
+  assert.ok(flat.includes('未命名会话'), '没跑过东西的会话也要有标题兜底')
+  assert.ok(flat.includes('s-untitl'), '标题缺失时退回会话号前缀')
+})
+
+await check('隔离队列：一个会话都没有时给出空态，首帧给加载态', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([])
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-x', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('还没有任何会话跑过'), `应是空态，实际：${flat.slice(0, 200)}`)
+
+  const slow = new Runtime()
+  globalThis.fetch = () => new Promise(() => {})
+  try {
+    const tree = await slow.mount(queue({ sessionId: 's-x', t }))
+    assert.ok(slow.text(tree).includes('读取中'), '数据还没到时先给加载态')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('隔离队列：不分会话那一桶不叫「未命名会话」，免得像是真有一个对话', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: '', active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' } }),
+  ])
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('后台任务'), `空会话号应说明它是后台任务，实际：${flat.slice(0, 200)}`)
+  assert.equal(flat.includes('未命名会话'), false, '不该把它当成一个没起名字的对话')
+})
+
+await check('隔离队列：手动刷新再问一次 /sessions，不会改任何设置', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    asked.push({ url: String(url), method: options?.method ?? 'GET' })
+    return sessionsPayload([sessionRow({})])
+  }
+  try {
+    await fresh.mount(queue({ sessionId: 's-alpha', t }))
+    const idle = asked.length
+    await fresh.button('刷新').props.onClick()
+    await fresh.mount(queue({ sessionId: 's-alpha', t }))
+    const freshCalls = asked.slice(idle)
+    assert.equal(freshCalls.length >= 1, true, '刷新按钮应该重新拉一次')
+    assert.equal(freshCalls.every((row) => row.method === 'GET'), true, '这一栏只读，不该发 POST')
+    assert.equal(asked.every((row) => row.url.includes('/sessions')), true, '只问 /sessions')
   } finally {
     globalThis.fetch = saved
   }
@@ -721,8 +917,28 @@ await check('点开箭头：摊出错误码、路由、尝试次数、判定时�
   assert.equal(rows.detailRoute, 'detailRoutegamma / two')
   assert.equal(rows.detailAttempts, 'detailAttempts1')
   assert.match(rows.detailAt, /^detailAt\d\d-\d\d \d\d:\d\d$/, '判定时间跟一个 MM-DD HH:MM 时间戳')
+  // 同一张名单里同一个模型可能挂在若干个会话名下，所以「是哪个会话撞的」必须写得出来。
+  assert.equal(rows.detailSession, 'detailSessionsess-long-name', '要点名隔离挂在哪个会话名下')
   assert.ok(rows.detailMessage.includes(TAIL_MARK), '展开就是为了看被截掉的那半句')
   assert.ok(rows.detailMessage.startsWith('detailMessage'), '带一行「报错原文」的标签')
+  // 收起时摘要行也给一句会话提示：一行行摊开看才知道是谁撞的，太费事。
+  // 这一页的 t() 是回声版（只回 key），所以这里认的是 key 而不是译文；插值另外验。
+  const summaries = runtime.nodes.filter((node) => node.props.className === 'mf-sub')
+  assert.ok(summaries.some((node) => node.text === 'rowSession'), '摘要行要带一段会话提示')
+})
+
+await check('设置页的隔离摘要用真字典渲染时，会话号前缀真的插进去了', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify(initialState()) })
+  try {
+    const tree = await fresh.mount(sections[0].component({ close() {}, t }))
+    const flat = fresh.text(tree)
+    assert.ok(flat.includes('会话 sess-lon…'), `摘要行应带会话号前缀，实际：${flat.slice(0, 400)}`)
+    assert.ok(flat.includes('会话 sess-alp…'), '两行挂在不同会话下，各写各的')
+  } finally {
+    globalThis.fetch = saved
+  }
 })
 
 await check('再点一下箭头就收回去，详情块整个消失', async () => {
