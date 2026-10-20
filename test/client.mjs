@@ -965,6 +965,11 @@ await check('同一个模型在三个会话里各撞一次：名单出三行，�
       (node) => node.props.className === 'mf-badge mf-bad' && String(node.text).includes('×3'),
     )
     assert.ok(badge !== undefined, `队列徽标应带 ×3，实际徽标：${JSON.stringify(fresh.nodes.filter((n) => String(n.props.className).includes('mf-badge')).map((n) => n.text))}`)
+    // 光有数字还不够：三个都是别人的会话时，当前会话照样能用它。
+    assert.ok(
+      String(badge.props.title).includes('sess-one') && String(badge.props.title).includes('sess-three'),
+      `徽标悬停要列出是哪几个会话撞的，实际：${badge.props.title}`,
+    )
     // 只按模型去重的话这里会是一个 map，键撞在一起，只剩最后一条。
     const card = fresh.nodes.find((node) => node.props.className === 'mf-title' && node.text.startsWith('今日隔离名单'))
     assert.ok(card !== undefined, '名单卡片应当出现，且标题里的计数按「模型 + 会话」算')

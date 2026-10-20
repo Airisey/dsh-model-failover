@@ -131,6 +131,7 @@ window.__ModuleLoader__.load({
         effortHint: '「默认档位」＝这个模型平时的档位（不指定）；档位表由模型自己提供。',
         queueEmpty: '队列是空的。从下面挑一个模型加进来，或者点「重新扫描」。',
         refQuarantine: '隔离中',
+        stuckIn: '撞过的会话：{list}',
         refGood: '已验证',
         moveUp: '上移',
         moveDown: '下移',
@@ -243,6 +244,7 @@ window.__ModuleLoader__.load({
         effortHint: '"Default effort" keeps the model’s own level (nothing is specified); the levels come from the model itself.',
         queueEmpty: 'The queue is empty. Add a model below, or press Rescan.',
         refQuarantine: 'quarantined',
+        stuckIn: 'Failed in: {list}',
         refGood: 'verified',
         moveUp: 'Move up',
         moveDown: 'Move down',
@@ -589,17 +591,35 @@ window.__ModuleLoader__.load({
       }, [state])
 
       /**
-       * 每个模型被几个会话隔离着。
+       * 每个模型被哪些会话隔离着。
        *
        * 队列徽标问的是「这个模型今天还能不能起头」。隔离按会话算，所以答案不是
        * 简单的能 / 不能：它在甲会话里废了，在乙会话里照样能用。徽标上带个数字，
        * 用户就知道那是「一个会话」还是「到处都撞墙」。
        */
       const stuckIn = useMemo(() => {
-        const counts = new Map()
-        for (const row of state?.quarantined ?? []) counts.set(row.key, (counts.get(row.key) ?? 0) + 1)
-        return counts
+        const table = new Map()
+        for (const row of state?.quarantined ?? []) {
+          const bucket = table.get(row.key) ?? []
+          bucket.push(row)
+          table.set(row.key, bucket)
+        }
+        return table
       }, [state])
+
+      /**
+       * 队列徽标的悬停提示：错误码 + 是哪些会话撞的。
+       *
+       * 一个模型挂在多个会话名下时，光看「隔离中 ×3」还是不知道躲不躲得开 ——
+       * 也许三个都是别人的会话，当前这个照常能用。把会话号列出来就答得了。
+       */
+      const stuckTitle = useCallback((key, row) => {
+        const head = `${row.code ?? ''} ${row.message ?? ''}`.trim()
+        const others = (stuckIn.get(key) ?? []).map((item) => item.sessionId ?? '').filter((id) => id !== '')
+        if (others.length <= 1) return head
+        const list = others.map((id) => (id.length > 8 ? id.slice(0, 8) : id)).join(' / ')
+        return `${head}\n${t('stuckIn', { list })}`
+      }, [stuckIn, t])
 
       /**
        * 名单卡片用的行：按「模型 + 会话」去重，而不是只按模型。
@@ -842,10 +862,13 @@ window.__ModuleLoader__.load({
                   ? span({
                       className: 'mf-badge mf-bad',
                       // 隔离按会话算：徽标上带数字，才知道是「就一个会话」还是
-                      // 「哪个会话都撞墙」。文字仍是「隔离中」，数字只是附加。
-                      title: `${bad.code ?? ''} ${bad.message ?? ''}`.trim(),
+                      // 「哪个会话都撞墙」。悬停时把会话号一并列出 —— 想知道
+                      // 「是哪个会话把我这个模型废了」不该逼人滚到名单里去数。
+                      title: stuckTitle(key, bad),
                     },
-                      (stuckIn.get(key) ?? 1) > 1 ? `${t('refQuarantine')} ×${stuckIn.get(key)}` : t('refQuarantine'),
+                      (stuckIn.get(key)?.length ?? 1) > 1
+                        ? `${t('refQuarantine')} ×${stuckIn.get(key).length}`
+                        : t('refQuarantine'),
                     )
                   : (isGood ? span({ className: 'mf-badge mf-ok' }, t('refGood')) : null),
                 div({ className: 'mf-actions' },
