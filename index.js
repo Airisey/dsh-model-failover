@@ -31,6 +31,7 @@ import {
   DEFAULT_TEMPLATE_ID,
   DEFAULT_TEMPLATE_NAME,
   MAX_TEMPLATES,
+  MAX_SAME_MODEL_RETRIES,
   MAX_TEMPLATE_CANDIDATES,
   MAX_TEMPLATE_NAME,
   NAMESPACE,
@@ -69,6 +70,9 @@ const AUTO_CONTINUE_HARD_LIMIT = 20
 
 /** 「继续」前的等待秒数上限：再多就不如让用户自己决定什么时候重试了。 */
 const CONTINUE_DELAY_HARD_LIMIT = 300
+
+/** 同一个模型额外重试几次的上限，和 lib/constants.js 的 MAX_SAME_MODEL_RETRIES 一致。 */
+const SAME_MODEL_RETRIES_HARD_LIMIT = MAX_SAME_MODEL_RETRIES
 
 /**
  * 一个会话最多回给浏览器几条「这一轮是谁在跑」的便签。
@@ -186,6 +190,15 @@ export function normalizeSettings(raw) {
       ? Math.min(source.continueDelaySec, CONTINUE_DELAY_HARD_LIMIT)
       : DEFAULT_SETTINGS.continueDelaySec
 
+  // 同样允许 0（= 每个模型只试一次，回到更早的行为）。老配置里没有这个键，
+  // 就按那个布尔开关折算，免得升级后行为悄悄变了。
+  const sameModelRetries =
+    Number.isInteger(source.sameModelRetries) && source.sameModelRetries >= 0
+      ? Math.min(source.sameModelRetries, SAME_MODEL_RETRIES_HARD_LIMIT)
+      : source.retrySameModelOnce === false
+        ? 0
+        : DEFAULT_SETTINGS.sameModelRetries
+
   return {
     enabled: source.enabled !== false,
     bootstrapped: source.bootstrapped === true,
@@ -193,6 +206,7 @@ export function normalizeSettings(raw) {
     editedTemplate,
     resetHour,
     retrySameModelOnce: source.retrySameModelOnce !== false,
+    sameModelRetries,
     continueText:
       typeof source.continueText === 'string' && source.continueText.trim() !== ''
         ? source.continueText.slice(0, 200)
@@ -455,6 +469,7 @@ export function apply(ctx, _config) {
     if ('editedTemplate' in patch) next.editedTemplate = patch.editedTemplate
     if ('resetHour' in patch) next.resetHour = patch.resetHour
     if ('retrySameModelOnce' in patch) next.retrySameModelOnce = patch.retrySameModelOnce !== false
+    if ('sameModelRetries' in patch) next.sameModelRetries = patch.sameModelRetries
     if ('continueText' in patch) next.continueText = patch.continueText
     if ('hiddenProviders' in patch) next.hiddenProviders = patch.hiddenProviders
     if ('retryWhenAllQuarantined' in patch) next.retryWhenAllQuarantined = patch.retryWhenAllQuarantined !== false

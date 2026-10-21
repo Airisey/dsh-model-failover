@@ -290,18 +290,20 @@ await check('第一个模型额度耗尽：先重发「继续」，再切下一�
   assert.equal(textOf(chunks), '跑完了', '最终应由第三个模型产出内容')
   assert.equal(finishOf(chunks)?.reason?.kind, 'stop', '结局应该是正常结束')
 
-  // 调用序列：alpha/one 两次（原始 + 继续），beta/one 两次，beta/two 一次。
+  // 调用序列：alpha/one 三次（首发 + 两次原样重发），beta/one 三次，beta/two 一次。
   assert.deepEqual(commands(h.llm), [
-    routeKey('alpha', 'one'), routeKey('alpha', 'one'),
-    routeKey('beta', 'one'), routeKey('beta', 'one'),
+    routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('alpha', 'one'),
+    routeKey('beta', 'one'), routeKey('beta', 'one'), routeKey('beta', 'one'),
     routeKey('beta', 'two'),
-  ], '每个候选都是先试一次、再带「继续」试一次；第几个模型就带几条「继续」')
+  ], '每个候选先原样试满 1+重试次数 次，第几个模型就带几条「继续」')
 
   // 「继续」确实进了消息，而不是只改了 provider/model。
   const betaCalls = h.llm.calls.filter((call) => call.key === routeKey('beta', 'one'))
   const countContinues = (call) => call.messages.filter((m) => m.role === 'user' && m.content?.[0]?.text === '继续').length
   assert.equal(countContinues(betaCalls[0]), 1, '切到第二个模型时应带上一条「继续」')
-  assert.equal(countContinues(betaCalls[1]), 2, '第二个模型的自身重试应再多一条「继续」')
+  assert.equal(countContinues(betaCalls[1]), 1, '同一模型的换账号重发要原样重发，不能越攒越多')
+  const alphaCalls = h.llm.calls.filter((call) => call.key === routeKey('alpha', 'one'))
+  assert.equal(countContinues(alphaCalls[2]), 0, '队首的重发不带「继续」')
 
   // 隔离与「已验证可用」
   const view = h.health.view(h.clock.ms, 1)
@@ -419,8 +421,8 @@ await check('当天隔离：下一个任务不再从坏模型开始', async () =
   assert.deepEqual(commands(h.llm), [routeKey('beta', 'one')], '第二个任务应直接从已验证可用的模型起步')
 })
 
-// 5b · 失败一次、被「继续」叫起来接着写完：不算「今天不行」
-await check('失败一次、补一句「继续」就写完：不隔离，并记成已验证可用', async () => {
+// 5b · 失败一次、原样重发就写完：不算「今天不行」
+await check('失败一次就原样重发：不隔离，并记成已验证可用', async () => {
   let turn = 0
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
@@ -430,10 +432,11 @@ await check('失败一次、补一句「继续」就写完：不隔离，并记�
     ]),
   })
 
-  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('帮我写个脚本')] }))
   assert.equal(textOf(chunks), '补上后半句')
-  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one')], '这句「继续」不该把人换掉')
-  assert.equal(lastUserText(h.llm.calls.at(-1).messages), '继续', '重试时应该带着「继续」')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one')], '这句重发不该把人换掉')
+  assert.deepEqual(h.llm.calls[1].messages, h.llm.calls[0].messages, '重发必须与首发一模一样，多账号反代靠这个换账号')
+  assert.equal(lastUserText(h.llm.calls.at(-1).messages), '帮我写个脚本', '重发不带「继续」—— 新账号没写过东西')
 
   const view = h.health.view(h.clock.ms, 1)
   assert.equal(view.quarantined.length, 0, '它产出内容了，不算今天出不了东西')
@@ -453,7 +456,7 @@ await check('隔离按会话分开：甲会话撞的墙，乙会话照样从队�
   // 甲会话：alpha 撞墙 → 隔离 → 换到 beta。
   const first = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], sessionId: 'sess-a' }))
   assert.equal(textOf(first), '乙会话的答案')
-  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('beta', 'one')])
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('beta', 'one')])
 
   // 乙会话：alpha 在甲那边坏了，但这边照旧从它开始试。
   h.llm.calls.length = 0
@@ -751,7 +754,7 @@ await check('链路层错误码（TRANSPORT）：同样不带「继续」', asyn
   }
 })
 
-await check('远端 5xx 照旧带「继续」—— 网络判据不能把该救的失败一起摁掉', async () => {
+await check('远端 5xx 照旧会被重试 —— 网络判据不能把该救的失败一起摁掉', async () => {
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
     scripts: new Map([
@@ -764,12 +767,13 @@ await check('远端 5xx 照旧带「继续」—— 网络判据不能把该救�
   assert.deepEqual(commands(h.llm), [
     routeKey('alpha', 'one'),
     routeKey('alpha', 'one'),
+    routeKey('alpha', 'one'),
     routeKey('beta', 'one'),
-  ], '远端 5xx 仍应走「重发一次 → 换人」')
+  ], '远端 5xx 仍应走「先原样重发，再换人」')
 
-  // 第二跳与换人都该带上「继续」。
-  assert.equal(lastUserText(h.llm.calls[1].messages), '继续')
-  assert.equal(lastUserText(h.llm.calls[2].messages), '继续')
+  // 同模型重发不带「继续」；换到第二个模型才带。
+  assert.equal(lastUserText(h.llm.calls[1].messages), '写一首诗', '换账号重发要原样')
+  assert.equal(lastUserText(h.llm.calls[3].messages), '继续', '换人这一跳才带「继续」')
 })
 
 await check('本机网络故障仍会隔离 —— 隔离语义没被这次改动动过', async () => {
@@ -813,7 +817,7 @@ await check('跨过设定的重置时间：重新从第一个模型开始尝试'
   h.clock.ms = new Date(2026, 1, 15, 1, 5, 0).getTime()
   h.llm.calls.length = 0
   await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
-  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('beta', 'one')],
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('beta', 'one')],
     '过了重置时间应重新从第一个模型开始')
 })
 
@@ -839,11 +843,11 @@ await check('空队列：给出可操作的报错', async () => {
   assert.match(finishOf(chunks)?.reason?.failure?.message ?? '', /还是空的/)
 })
 
-// 8 · 关掉「同模型重发一次」
-await check('关掉重发：每换个模型只试一次', async () => {
+// 8 · 把同模型重试次数设成 0
+await check('重试次数设 0：每换个模型只试一次', async () => {
   const h = await harness({
     order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
-    settings: { retrySameModelOnce: false },
+    settings: { sameModelRetries: 0 },
     scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('好')]]),
   })
   const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
@@ -851,16 +855,24 @@ await check('关掉重发：每换个模型只试一次', async () => {
   assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('beta', 'one')])
 })
 
-// 9 · 补发节奏：每次失败之后先等一等
+// 9 · 补发节奏：每次换人带「继续」之前先等一等
 await check('补发节奏：每次「继续」之前都先等一等，首次请求不等', async () => {
   const h = await harness({
-    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
-    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('好')]]),
+    order: [
+      { provider: 'alpha', model: 'one' },
+      { provider: 'beta', model: 'one' },
+      { provider: 'beta', model: 'two' },
+    ],
+    settings: { sameModelRetries: 0 },
+    scripts: new Map([
+      [routeKey('alpha', 'one'), quota()],
+      [routeKey('beta', 'one'), quota()],
+      [routeKey('beta', 'two'), ok('好')],
+    ]),
   })
   const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
   assert.equal(textOf(chunks), '好')
-  // 两次调用之间的三次尝试（alpha 首发、alpha 重发、beta 补继续）里，
-  // 只有后两次带「继续」，所以只该等两回。
+  // 三次带「继续」的跳（第二、三个模型），每跳之前各等一次；首发不等。
   assert.deepEqual(h.waits, [5000, 5000], '每个带「继续」的跳都该等一次')
 })
 
@@ -886,7 +898,7 @@ await check('补发节奏：等待期间用户按了停止，不再打注定被�
   const realSleep = h.adapter.sleep
   h.adapter.sleep = async (ms, signal) => { await realSleep(ms, signal); controller.abort() }
   const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [], signal: controller.signal }))
-  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one')], '中止后不该再碰下一个模型')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('alpha', 'one')], '中止后不该再碰下一个模型')
   assert.equal(finishOf(chunks)?.reason?.failure?.code, 'QUOTA', '交出的仍是上一个候选的真实结局')
   assert.equal(textOf(chunks), '', '不该出现下一个模型的文字')
 })

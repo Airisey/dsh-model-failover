@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     /** 模板数量与名字长度的上限，与 lib/constants.js 保持一致。 */
     const MAX_TEMPLATES = 8
     const MAX_TEMPLATE_NAME = 24
+    /** 同一个模型额外重试次数的上限，同样与 lib/constants.js 保持一致。 */
+    const MAX_SAME_MODEL_RETRIES = 5
 
     /** cordis 服务名（不是包名）。`slots` 用来插设置页，`locale` 用来翻译。 */
     const inject = ['slots', 'locale']
@@ -104,6 +106,7 @@ window.__ModuleLoader__.load({
 .mf-qv-top { display: flex; align-items: baseline; gap: 8px; }
 .mf-qv-title { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mf-qv-id { flex: none; opacity: .45; font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mf-qv-clear { flex: none; font-size: 11.5px; padding: 1px 8px; }
 .mf-qv-line { display: flex; align-items: baseline; gap: 8px; }
 .mf-qv-label { flex: none; width: 4.5em; opacity: .55; font-size: 11.5px; }
 .mf-qv-value { flex: 1; min-width: 0; word-break: break-word; }
@@ -166,6 +169,10 @@ window.__ModuleLoader__.load({
           '开着的时候，队列里的模型会一直在后台自动接力：一个产不出东西就换下一个，直到有人把这一轮做完。',
         optEnabled: '启用接力',
         optEnabledHint: '关掉后队列退化为「只使用第一个模型」。',
+        optSameModelRetries: '同一个模型失败后重试几次',
+        optSameModelRetriesHint:
+          '一个模型背后可能挂着几个账号（dsh-our-free-model 这类多账号反代就是这样）。失败一次通常只停用了其中一个账号，把原请求一模一样再发一遍，它就会换个人来答；试满这么多次还不行，才判这个模型今天不行、换队列里的下一个。这些重发不带「继续」——新账号没写过东西，没什么可继续的。',
+        optSameModelRetriesUnit: '次',
         optAllQuarantined: '全部被隔离时仍然按顺序试一遍',
         optAllQuarantinedHint: '关掉后队列里全是隔离模型时会直接报错，不再尝试。',
         optKeepLog: '记录事件日志',
@@ -219,10 +226,10 @@ window.__ModuleLoader__.load({
         tailModel: '本轮：{label}',
         viewQuarantine: '隔离队列',
         qvHint:
-          '隔离是「按会话」算的：某个模型在哪个会话里撞了墙，就只在那个会话里被跳过，别的会话照常用它。下面按会话列出正在使用的模型和已经被隔离的模型。右上角那个按钮只解除你自己这个会话的隔离。',
+          '隔离是「按会话 × 模板」算的：某个模型在哪个会话的哪条模板上撞了墙，就只在那条队列里被跳过，别的会话、别的模板照常用它。下面按会话列出正在使用的模型和已经被隔离的模型，每个会话右边那个按钮只解除它自己的隔离。',
         qvRefresh: '刷新',
-        qvClear: '解除本会话隔离',
-        qvClearHint: '只解除当前这个会话的隔离，别的会话不受影响。',
+        qvClear: '解除隔离',
+        qvClearHint: '只解除这个会话的隔离，别的会话一条都不动。',
         qvLoading: '读取中…',
         qvFailed: '读取失败：{message}',
         qvEmpty: '还没有任何会话跑过。',
@@ -279,6 +286,10 @@ window.__ModuleLoader__.load({
           'While this is on, the queued models keep relaying in the background: one produces nothing and the next takes over, until someone finishes the turn.',
         optEnabled: 'Relay enabled',
         optEnabledHint: 'Turned off, the queue degrades to "always the first model".',
+        optSameModelRetries: 'Retries per model',
+        optSameModelRetriesHint:
+          'One model can sit in front of several accounts (multi-account proxies such as dsh-our-free-model). A failure usually only benches one account, so re-sending the very same request lands on another one. Only after all retries fail is the model treated as broken and the next one tried. These retries carry no "continue" text — a fresh account has written nothing to continue.',
+        optSameModelRetriesUnit: 'times',
         optAllQuarantined: 'Still try the queue when all are quarantined',
         optAllQuarantinedHint: 'Turned off, an all-quarantined queue fails immediately.',
         optKeepLog: 'Keep an event log',
@@ -332,10 +343,10 @@ window.__ModuleLoader__.load({
         tailModel: 'Turn: {label}',
         viewQuarantine: 'Quarantine',
         qvHint:
-          'Quarantine is per conversation: a model that failed inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined. The button at the right only clears the conversation you are in.',
+          'Quarantine is per conversation and per template: a model that failed on one queue inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined; the button on each row only clears that conversation.',
         qvRefresh: 'Refresh',
-        qvClear: 'Clear this conversation',
-        qvClearHint: 'Only clears the quarantine of the conversation you are in; other conversations are untouched.',
+        qvClear: 'Clear',
+        qvClearHint: 'Only clears the quarantine of this conversation; other conversations are untouched.',
         qvLoading: 'Loading…',
         qvFailed: 'Could not load: {message}',
         qvEmpty: 'No conversation has run anything yet.',
@@ -898,6 +909,21 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onChange: (value) => void run('/settings', { enabled: value }),
             }),
+            div({ className: 'mf-opt' },
+              div({ className: 'mf-opt-main' },
+                div(null, t('optSameModelRetries')),
+                div({ className: 'mf-note' }, t('optSameModelRetriesHint')),
+              ),
+              h(NumberInput, {
+                value: settings.sameModelRetries ?? 2,
+                min: 0,
+                max: MAX_SAME_MODEL_RETRIES,
+                name: 'sameModelRetries',
+                disabled: busy || settings.enabled === false,
+                onCommit: (value) => { if (value !== settings.sameModelRetries) void run('/settings', { sameModelRetries: value }) },
+              }),
+              span({ className: 'mf-note' }, t('optSameModelRetriesUnit')),
+            ),
             h(ToggleRow, {
               label: t('optAllQuarantined'),
               hint: t('optAllQuarantinedHint'),
@@ -1220,7 +1246,7 @@ window.__ModuleLoader__.load({
      * 拿不到时退回会话号前缀 —— 这一栏是给人看「哪个会话出事了」，标题只是
      * 帮助识别，缺了也不能空白。
      */
-    function SessionQueueRow({ row, mine, title, t, templateName }) {
+    function SessionQueueRow({ row, mine, title, t, templateName, onClear, busy }) {
       const quarantined = row?.quarantined ?? []
       const good = row?.good ?? []
       const active = row?.active
@@ -1232,6 +1258,15 @@ window.__ModuleLoader__.load({
           span({ className: 'mf-qv-title' }, title === undefined || title === '' ? t('qvUnnamed') : title),
           mine ? span({ className: 'mf-badge mf-ok' }, t('qvCurrent')) : null,
           span({ className: 'mf-qv-id' }, shortId(row?.sessionId)),
+          // 解除按钮就在这一行上：解哪个会话的隔离，按钮长在哪个会话上最没歧义。
+          // 没有隔离就点不动 —— 灰着比按下去什么也不发生更好懂。
+          h('button', {
+            type: 'button',
+            className: 'mf-btn mf-qv-clear',
+            disabled: busy || quarantined.length === 0,
+            title: t('qvClearHint'),
+            onClick: () => onClear?.(row?.sessionId ?? ''),
+          }, t('qvClear')),
         ),
         div({ className: 'mf-qv-line' },
           span({ className: 'mf-qv-label' }, t('qvActive')),
@@ -1359,25 +1394,17 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * 这个会话现在压着几个模型。
-       *
-       * 解除按钮只在真有东西可解时点得动 —— 一个从头到尾都正常的会话摆着一个
-       * 能按的按钮，按下去什么也不会发生，比按钮灰着更让人困惑。
-       */
-      const mineRow = scoped ? rows.find((row) => row.sessionId === mineId) : undefined
-      const mineCount = Array.isArray(mineRow?.quarantined) ? mineRow.quarantined.length : 0
-
-      /**
-       * 只解除**当前这一栏**对应会话的隔离。
+       * 解除**某一个会话**的隔离。
        *
        * 会话号走查询串，因为 POST 的 body 已经被设置补丁占用了；宿主那边按
-       * 「带不带 sessionId」分成按会话解除与全局解除两条路径。
+       * 「带不带 sessionId」分成按会话解除与全局解除两条路径。按钮长在会话行上，
+       * 所以传进来的是那一行的会话号，不是「当前会话」。
        */
-      const clearMine = useCallback(async () => {
+      const clearOne = useCallback(async (sessionId) => {
         if (!scoped || busy) return
         setBusy(true)
         try {
-          const next = await post(`/reset?sessionId=${encodeURIComponent(mineId)}`, {})
+          const next = await post(`/reset?sessionId=${encodeURIComponent(sessionId)}`, {})
           if (!alive.current) return
           // 响应里已经把新的会话列表带回来了，先用它落屏，省一次往返。
           if (Array.isArray(next?.sessions)) setData((previous) => ({ ...(previous ?? {}), ...next }))
@@ -1389,20 +1416,12 @@ window.__ModuleLoader__.load({
         } finally {
           if (alive.current) setBusy(false)
         }
-      }, [busy, load, mineId, scoped])
+      }, [busy, load, scoped])
 
       return div({ className: 'mf-qv' },
         div({ className: 'mf-qv-head' },
           div({ className: 'mf-title' }, t('viewQuarantine')),
           data?.day ? span({ className: 'mf-note' }, t('qvDay', { day: data.day })) : null,
-          h('button', {
-            type: 'button',
-            className: 'mf-btn',
-            // 没有隔离就没什么可解的：灰着比按下去没反应更好懂。
-            disabled: busy || !scoped || mineCount === 0,
-            title: t('qvClearHint'),
-            onClick: () => void clearMine(),
-          }, t('qvClear')),
           h('button', {
             type: 'button',
             className: 'mf-btn',
@@ -1423,6 +1442,8 @@ window.__ModuleLoader__.load({
                 title: titleOf(row.sessionId),
                 t,
                 templateName,
+                busy,
+                onClear: (sessionId) => void clearOne(sessionId),
               })),
       )
     }

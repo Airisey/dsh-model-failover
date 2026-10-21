@@ -785,6 +785,33 @@ await check('等待秒数能被往返序列化，且 0 不会在往返里变回�
   assert.equal(normalizeSettings({ continueDelaySec: 30 }).continueDelaySec, 30)
 })
 
+await check('同模型重试次数：0 合法，负数 / 小数 / 字符串回默认，超上限夹到 5', () => {
+  assert.equal(normalizeSettings({ sameModelRetries: 3 }).sameModelRetries, 3)
+  assert.equal(normalizeSettings({ sameModelRetries: 0 }).sameModelRetries, 0, '0 = 每个模型只试一次，必须存得进去')
+  assert.equal(normalizeSettings({ sameModelRetries: -1 }).sameModelRetries, 2, '负数非法 → 回默认')
+  assert.equal(normalizeSettings({ sameModelRetries: 2.5 }).sameModelRetries, 2, '小数不认')
+  assert.equal(normalizeSettings({ sameModelRetries: '4' }).sameModelRetries, 2, '字符串不认')
+  assert.equal(normalizeSettings({ sameModelRetries: 99 }).sameModelRetries, 5, '夹到硬上限')
+  assert.equal(normalizeSettings({}).sameModelRetries, 2, '没写过就用默认值')
+})
+
+await check('同模型重试次数：老配置靠 retrySameModelOnce 折算，读过新键之后旧开关就失效', () => {
+  assert.equal(normalizeSettings({ retrySameModelOnce: false }).sameModelRetries, 0, '老配置关掉过「多试一次」→ 每个模型只试一次')
+  assert.equal(normalizeSettings({ retrySameModelOnce: true }).sameModelRetries, 2, '老配置开着 → 用新的默认值')
+  assert.equal(
+    normalizeSettings({ retrySameModelOnce: false, sameModelRetries: 4 }).sameModelRetries,
+    4,
+    '新键写了就以新键为准，旧布尔开关不再管用',
+  )
+})
+
+await check('同模型重试次数能被往返序列化，且 0 不会在往返里变回默认值', () => {
+  const s = normalizeSettings({ sameModelRetries: 0 })
+  const back = normalizeSettings(JSON.parse(JSON.stringify(s)))
+  assert.equal(back.sameModelRetries, 0)
+  assert.equal(normalizeSettings({ sameModelRetries: 5 }).sameModelRetries, 5)
+})
+
 // ── 收尾 ────────────────────────────────────────────────────────────────────
 
 process.stdout.write(`\nautocontinue: ${passed} passed, ${failed} failed\n`)

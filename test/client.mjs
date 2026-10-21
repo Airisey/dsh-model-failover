@@ -310,6 +310,7 @@ const initialState = () => ({
     editedTemplate: 'default',
     resetHour: 1,
     retrySameModelOnce: true,
+    sameModelRetries: 2,
     continueText: '继续',
     hiddenProviders: [],
     retryWhenAllQuarantined: true,
@@ -839,31 +840,57 @@ await check('隔离队列：手动刷新再问一次 /sessions，不会改任何
   }
 })
 
-// ── 解除隔离的按钮（只在会话页那一栏，只解当前会话） ─────────────────────────
+// ── 解除隔离的按钮（长在每个会话行上，只解那一个会话） ────────────────────────
 
-/** 有隔离的会话行，用来喂「解除本会话隔离」那个按钮。 */
+/** 有隔离的会话行，用来喂每一行右边那个解除按钮。 */
 const stuckRow = (sessionId, overrides) => sessionRow({
   sessionId,
   quarantined: [{ key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId, label: 'Code99 · Beta One' }],
   ...overrides,
 })
 
-await check('设置页不再有「解除今日隔离」按钮：那件事挪到会话页去了，且只解当前会话', () => {
+/** 一行一个解除按钮，按渲染顺序（当前会话被提到最前）。 */
+const clearButtons = (runtime) => runtime.nodes.filter(
+  (node) => String(node.props?.className ?? '').includes('mf-qv-clear'),
+)
+
+await check('设置页不再有「解除今日隔离」按钮：那件事挪到会话页去了，且只解那一个会话', () => {
   const labels = runtime.nodes.filter((node) => node.tag === 'button').map((node) => node.text)
   assert.equal(labels.includes('解除今日隔离'), false, '设置页那个全局解除按钮应当已经撤掉')
 })
 
-await check('隔离队列：解除按钮只解当前会话，请求带 sessionId 且只解那一个', async () => {
+await check('隔离队列：顶部不再有解除按钮，改成每个会话行右边一个', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([stuckRow('s-mine'), stuckRow('s-other')])
+  let buttons
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    buttons = clearButtons(fresh)
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(buttons.length, 2, '两个会话，两个按钮')
+  const head = fresh.nodes.find((node) => node.props?.className === 'mf-qv-head')
+  const inHead = [].concat(head?.props?.children ?? []).filter(
+    (child) => String(child?.props?.className ?? '').includes('mf-qv-clear'),
+  )
+  assert.equal(inHead.length, 0, '页顶那个按钮应当撤掉')
+})
+
+await check('隔离队列：点哪一行的按钮就解哪个会话，请求带的是那一行的 sessionId', async () => {
   const fresh = new Runtime()
   const asked = []
   const saved = globalThis.fetch
-  let payload = [stuckRow('s-mine'), stuckRow('s-other')]
+  let payload = [stuckRow('s-mine'), stuckRow('s-other', {
+    quarantined: [{ key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'SERVER', message: '上游 502', at, sessionId: 's-other', label: 'FutureHub · Gamma Two' }],
+  })]
   globalThis.fetch = async (url, options) => {
     const target = String(url)
     asked.push({ url: target, method: options?.method ?? 'GET' })
     if ((options?.method ?? 'GET') === 'POST') {
-      // 宿主只解这一个会话：响应里回来的列表就是「我干净了、别人还挂着」。
-      payload = [sessionRow({ sessionId: 's-mine' }), stuckRow('s-other')]
+      // 宿主只解这一个会话：响应回来的列表就是「它干净了、别人还挂着」。
+      payload = [sessionRow({ sessionId: 's-mine' }), payload[1]]
       return {
         ok: true,
         status: 200,
@@ -882,8 +909,8 @@ await check('隔离队列：解除按钮只解当前会话，请求带 sessionId
   let flat
   try {
     await fresh.mount(queue({ sessionId: 's-mine', t }))
-    await fresh.button('解除本会话隔离').props.onClick()
-    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    // 第一行是当前会话（置顶），点它。
+    await clearButtons(fresh)[0].props.onClick()
     flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
   } finally {
     globalThis.fetch = saved
@@ -894,27 +921,59 @@ await check('隔离队列：解除按钮只解当前会话，请求带 sessionId
   assert.equal(
     posted.every((row) => row.url.includes('sessionId=s-mine')),
     true,
-    `必须带上当前会话号，否则会变成全局解除：${JSON.stringify(posted.map((row) => row.url))}`,
+    `必须带上那一行的会话号，否则会变成全局解除：${JSON.stringify(posted.map((row) => row.url))}`,
   )
-  // 别人的隔离还在，所以那一行仍然写着 Code99 · Beta One。
-  assert.ok(flat.includes('Code99 · Beta One'), `别的会话的隔离不该被顺手清掉，实际：${flat.slice(0, 400)}`)
+  // 别人的隔离还在，所以那一行仍然写着 FutureHub · Gamma Two。
+  assert.ok(flat.includes('FutureHub · Gamma Two'), `别的会话的隔离不该被顺手清掉，实际：${flat.slice(0, 400)}`)
+  assert.equal(flat.includes('Code99 · Beta One'), false, '自己那一行的隔离应当跟着响应消失')
 })
 
-await check('隔离队列：本会话没被隔离时解除按钮是灰的，按不动', async () => {
+await check('隔离队列：每个会话各行其事，点别人的按钮解的是别人', async () => {
+  const fresh = new Runtime()
+  const asked = []
+  const saved = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    const target = String(url)
+    if ((options?.method ?? 'GET') !== 'POST') return sessionsPayload([stuckRow('s-mine'), stuckRow('s-other')])
+    asked.push({ url: target, method: 'POST' })
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, now: at, day: '2026-11-27', cleared: 1, sessionId: 's-other', sessions: [] }),
+    }
+  }
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    await clearButtons(fresh)[1].props.onClick()
+  } finally {
+    globalThis.fetch = saved
+  }
+  const posted = asked.filter((row) => row.method === 'POST')
+  assert.equal(posted.length >= 1, true, '第二行的按钮也得能按')
+  assert.equal(
+    posted.every((row) => row.url.includes('sessionId=s-other')),
+    true,
+    `点第二行就该解第二个会话：${JSON.stringify(posted.map((row) => row.url))}`,
+  )
+})
+
+await check('隔离队列：没有隔离的会话，它那一行的解除按钮是灰的', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
   globalThis.fetch = async () => sessionsPayload([
     sessionRow({ sessionId: 's-mine' }),
     stuckRow('s-other'),
   ])
+  let buttons
   try {
     await fresh.mount(queue({ sessionId: 's-mine', t }))
+    buttons = clearButtons(fresh)
   } finally {
     globalThis.fetch = saved
   }
-  const button = fresh.button('解除本会话隔离')
-  assert.equal(button.props.disabled, true, '自己没有隔离可解时不该能按')
-  assert.throws(() => fresh.enabledButton('解除本会话隔离'), /没有找到/, '不该存在可用的解除按钮')
+  assert.equal(buttons.length, 2, '两个会话，两个按钮')
+  assert.equal(buttons[0].props.disabled, true, '自己没有隔离可解时不该能按')
+  assert.equal(buttons[1].props.disabled, false, '有隔离的那个会话应当能按')
 })
 
 // ── 首帧 / 错误态（各自一个全新的渲染器，避免和别的用例串味） ────────────────
@@ -975,7 +1034,7 @@ globalThis.fetch = async (url, init = {}) => {
         }))
       }
       if (typeof body.editedTemplate === 'string') current.settings.editedTemplate = body.editedTemplate
-      for (const key of ['enabled', 'retrySameModelOnce', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -1134,6 +1193,52 @@ await check('✕ 把这一行移出队列', async () => {
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
   assert.deepEqual(posts[0].body.templates[0].order.map((row) => row.provider), ['alpha', 'gamma'])
+})
+
+/** 「同一个模型失败后重试几次」那个框（0-5，靠 data-name 认）。 */
+const sameModelInput = () => runtime.find(
+  (node) => node.tag === 'input' && node.props['data-name'] === 'sameModelRetries',
+)
+
+await check('模型异常：同模型重试次数显示宿主的值，失焦后 POST sameModelRetries 并夹到 0-5', async () => {
+  assert.equal(sameModelInput().props.value, '2', '应显示宿主设置里的值')
+  assert.equal(sameModelInput().props.disabled, false, '接力开着时可改')
+
+  const before = requests.length
+  sameModelInput().props.onChange({ target: { value: '9' } })
+  await runtime.mount(page(props))
+  assert.equal(sameModelInput().props.value, '9', '输入框应保留用户敲进去的草稿')
+  sameModelInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { sameModelRetries: 5 }, '夹到硬上限 5')
+  assert.equal(current.settings.sameModelRetries, 5)
+
+  // 恢复成默认值，免得影响后面的用例。
+  sameModelInput().props.onChange({ target: { value: '2' } })
+  await runtime.mount(page(props))
+  sameModelInput().props.onBlur()
+  await runtime.mount(page(props))
+})
+
+await check('模型异常：重试次数允许填 0（每个模型只试一次），0 照实发出去', async () => {
+  const before = requests.length
+  sameModelInput().props.onChange({ target: { value: '0' } })
+  await runtime.mount(page(props))
+  sameModelInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { sameModelRetries: 0 }, '0 是合法值，不能被当成「没填」')
+  assert.equal(current.settings.sameModelRetries, 0)
+
+  sameModelInput().props.onChange({ target: { value: '2' } })
+  await runtime.mount(page(props))
+  sameModelInput().props.onBlur()
+  await runtime.mount(page(props))
 })
 
 await check('总开关能关掉，POST 的是布尔值', async () => {

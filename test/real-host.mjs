@@ -312,7 +312,7 @@ await check('真宿主：每个候选只收到它自己认识的档位，别的�
   const h = await boot({
     order: [
       { provider: 'alpha', model: 'one', reasoningEffort: 'high' },
-      // beta 只认 minimal：给它设的 high 不该发下去，也不该被「继续」那一轮带过去。
+      // beta 只认 minimal：给它设的 high 不该发下去，也不该被后面的重发带过去。
       { provider: 'beta', model: 'one', reasoningEffort: 'high' },
     ],
     adapters: { alpha, beta },
@@ -327,9 +327,9 @@ await check('真宿主：每个候选只收到它自己认识的档位，别的�
     const result = await h.stream()
     assert.equal(result.text, '换我上')
 
-    assert.equal(alpha.calls.length, 2)
+    assert.equal(alpha.calls.length, 3)
     assert.equal(alpha.calls[0].reasoningEffort, 'high', 'alpha 认识 high，应原样收到')
-    assert.equal(alpha.calls[1].reasoningEffort, 'high', '「继续」那一轮也还是这个档位')
+    assert.equal(alpha.calls[1].reasoningEffort, 'high', '原样重发那一轮也还是这个档位')
 
     assert.equal(beta.calls.length, 1)
     // 宿主会把候选模型**自己的** defaultEffort 落到 options 上，所以即使我们删掉
@@ -379,7 +379,7 @@ await check('真宿主：路由级的档位只在候选没专设、且它认识�
   }
 })
 
-await check('真注册表：一个模型两次不行就换下一个，两次都带「继续」且保留原始请求', async () => {
+await check('真注册表：一个模型原样重发几次再换下一个，换人那一跳才带「继续」', async () => {
   const alpha = new StubAdapter('alpha', () => QUOTA)
   const beta = new StubAdapter('beta', () => OK('beta 顶上'))
   const h = await boot({
@@ -394,12 +394,12 @@ await check('真注册表：一个模型两次不行就换下一个，两次都�
     assert.equal(result.text, 'beta 顶上')
     assert.deepEqual(result.finish, { type: 'finish', reason: { kind: 'stop' } })
 
-    assert.equal(alpha.calls.length, 2, `alpha 应被叫两次（首发 + 一次「继续」），实际 ${alpha.calls.length}`)
+    assert.equal(alpha.calls.length, 3, `alpha 应被叫 3 次（首发 + 两次原样重发），实际 ${alpha.calls.length}`)
     assert.equal(beta.calls.length, 1)
 
-    // 首发是干净的原始请求，重试与换人都在原请求后面追加「继续」。
+    // 同模型重发一律原样；只有换到下一个模型时才追加「继续」。
     assert.equal(shape(alpha.calls[0].messages), 'user:写一首诗')
-    assert.equal(shape(alpha.calls[1].messages), 'user:写一首诗 → user:继续')
+    assert.equal(shape(alpha.calls[1].messages), 'user:写一首诗', '换账号重发必须是同一个请求')
     assert.equal(shape(beta.calls[0].messages), 'user:写一首诗 → user:继续')
   } finally {
     h.dispose()
@@ -422,8 +422,8 @@ await check('真注册表：补发「继续」之前真的会等一会儿（设�
     const result = await h.stream()
     const elapsed = Date.now() - started
     assert.equal(result.text, '等完才轮到我')
-    // 两跳带「继续」（alpha 重发 + beta 补继续），各等 1 秒；首发那一跳不等。
-    assert.ok(elapsed >= 2000, `两次「继续」各等 1 秒，实际只花了 ${elapsed}ms`)
+    // 只有换人那一跳带「继续」，各等 1 秒；同模型重发与首发都不等。
+    assert.ok(elapsed >= 1000, `「继续」那一跳要等 1 秒，实际只花了 ${elapsed}ms`)
     assert.ok(elapsed < 10000, `不该等到天荒地老，实际 ${elapsed}ms`)
   } finally {
     h.dispose()
@@ -444,8 +444,8 @@ await check('真注册表：换人按队列顺序走，前一个模型被隔离'
   try {
     const result = await h.stream()
     assert.equal(result.text, '轮到我了')
-    assert.equal(alpha.calls.length, 2)
-    assert.equal(beta.calls.length, 2, 'beta/one 两次，然后成功')
+    assert.equal(alpha.calls.length, 3)
+    assert.equal(beta.calls.length, 2, 'beta/one 第一次失败、第二次成功')
 
     const state = h.state()
     assert.ok(state.quarantine[`${'alpha'}\u0000one`], `当天隔离里应有 alpha/one：${JSON.stringify(state)}`)
@@ -468,11 +468,11 @@ await check('真注册表：当天被判定不行的模型，下一个任务不�
   })
   try {
     await h.stream()
-    assert.equal(alpha.calls.length, 2)
+    assert.equal(alpha.calls.length, 3)
 
     const second = await h.stream()
     assert.equal(second.text, '我还是顶上')
-    assert.equal(alpha.calls.length, 2, '同一天里第二个任务不该再碰 alpha')
+    assert.equal(alpha.calls.length, 3, '同一天里第二个任务不该再碰 alpha')
     assert.equal(beta.calls.length, 2)
     // 第二个任务是从「验证过能用」的那一个直接开始的，不必先带「继续」。
     assert.equal(shape(beta.calls[1].messages), 'user:写一首诗')
@@ -506,7 +506,7 @@ await check('真注册表：已经吐出正文之后就不换人了，错误照�
   }
 })
 
-await check('真注册表：本机网络故障时不带「继续」，但远端 5xx 照带', async () => {
+await check('真注册表：本机网络故障时全程不带「继续」，远端 5xx 只在换人时带', async () => {
   const alpha = new StubAdapter('alpha', () => LOCAL_NETWORK)
   const beta = new StubAdapter('beta', () => OK('网络回魂了'))
   const h = await boot({
@@ -541,8 +541,8 @@ await check('真注册表：本机网络故障时不带「继续」，但远端 
   try {
     const result = await h2.stream()
     assert.equal(result.text, '顶上了')
-    assert.equal(shape(gamma.calls[1].messages), 'user:写一首诗 → user:继续', '远端 5xx 该带「继续」重发')
-    assert.equal(shape(delta.calls[0].messages), 'user:写一首诗 → user:继续', '换人也该带「继续」')
+    assert.equal(shape(gamma.calls[1].messages), 'user:写一首诗', '同模型重发仍是原样请求')
+    assert.equal(shape(delta.calls[0].messages), 'user:写一首诗 → user:继续', '换人要带「继续」')
   } finally {
     h2.dispose()
   }
