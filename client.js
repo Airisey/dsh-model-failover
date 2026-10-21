@@ -39,6 +39,14 @@ window.__ModuleLoader__.load({
     /** 同一个模型额外重试次数的上限，同样与 lib/constants.js 保持一致。 */
     const MAX_SAME_MODEL_RETRIES = 5
 
+    /**
+     * 试连接同时发几条。
+     *
+     * 一条模板动辄十几个模型，串着发要等好几分钟；但一口气全发出去又容易撞上
+     * 供应商的并发限流，那反而是假故障。4 是「够快、又不至于自己把自己限流」。
+     */
+    const PROBE_CONCURRENCY = 4
+
     /** cordis 服务名（不是包名）。`slots` 用来插设置页，`locale` 用来翻译。 */
     const inject = ['slots', 'locale']
 
@@ -72,6 +80,12 @@ window.__ModuleLoader__.load({
 .mf-fail { color: #e5484d; min-width: 1.2em; text-align: right; opacity: .85; }
 .mf-good { color: #30a46c; min-width: 1.2em; text-align: right; opacity: .85; }
 .mf-text { font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; min-width: 0; max-width: 260px; width: 100%; }
+/* 试连接的结果，紧跟在模型名字后面。它是**这一次体检**的结论，不是隔离状态：
+   关掉设置页就没了，所以画成一个小胶囊，别让它看起来像常驻标记。 */
+.mf-probe { flex: none; margin-left: 7px; padding: 0 6px; border-radius: 999px; border: 1px solid currentColor; font-size: 10.5px; font-weight: 400; vertical-align: 1px; }
+.mf-probe-busy { opacity: .4; }
+.mf-probe-ok { color: #30a46c; }
+.mf-probe-bad { color: #e5484d; }
 .mf-text:hover:not(:disabled) { border-color: color-mix(in srgb, currentColor 18%, transparent); }
 .mf-text:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); background: color-mix(in srgb, currentColor 5%, transparent); }
 .mf-btn { font: inherit; color: inherit; background: transparent; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 3px 9px; cursor: pointer; }
@@ -149,6 +163,15 @@ window.__ModuleLoader__.load({
         templateDelete: '删除这个模板',
         templateAdd: '新建模板',
         templateAddHint: '最多 8 个。新建出来是空队列，从下面把模型加进去。',
+        templateProbe: '测试连接',
+        templateProbeHint:
+          '把这条队列里的模型挨个试一次，结果显示在下面每个模型名字后面。只发一句「hi」，花不了几个 token；结果关掉设置页就没了。',
+        probeBusy: '测试中…',
+        probeOk: '通',
+        probeBad: '不通',
+        probeRunning: '正在等这个模型的回应',
+        probeOkHint: '{ms} 毫秒收到回应',
+        probeBadHint: '试连接失败',
         failCountHint: '今天这个模型一共失败了几次（所有会话合计）',
         goodCountHint: '今天这个模型成功了几次（所有会话合计）',
         queueHint:
@@ -266,6 +289,15 @@ window.__ModuleLoader__.load({
         templateDelete: 'Delete this template',
         templateAdd: 'New template',
         templateAddHint: 'Up to 8. A new one starts empty — add models below.',
+        templateProbe: 'Test',
+        templateProbeHint:
+          'Pings every model in this queue once and shows the result next to each name below. It only sends “hi”, so it costs almost nothing; the results are gone once you close this page.',
+        probeBusy: 'Testing…',
+        probeOk: 'OK',
+        probeBad: 'Fail',
+        probeRunning: 'Waiting for this model',
+        probeOkHint: 'Answered in {ms} ms',
+        probeBadHint: 'Connection test failed',
         failCountHint: 'How many times this model failed today (all conversations)',
         goodCountHint: 'How many times this model succeeded today (all conversations)',
         queueHint:
@@ -503,24 +535,47 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState('')
       const [busy, setBusy] = useState(false)
       const [addKey, setAddKey] = useState('')
+      /**
+       * 试连接的结果，键是 `provider\0model`。
+       *
+       * **刻意只放在组件里、不落盘**：一次体检的结论过几分钟就可能不准（账号
+       * 掉了、额度用完了），留着只会误导人。设置页一关，它就跟着没了。
+       */
+      const [probes, setProbes] = useState({})
+      /** 正在测哪个模板（空串 = 没有在测）。 */
+      const [probingId, setProbingId] = useState('')
       const [, setTick] = useState(0)
       const alive = useRef(true)
 
       useEffect(() => () => { alive.current = false }, [])
 
-      const load = useCallback(async () => {
+      const load = useCallback(async (scan = false) => {
         try {
-          const next = await getState()
+          // 打开设置页顺带扫一次目录：新接进来的 provider、新登录的账号，进来
+          // 就该在清单里，不该先让用户去点一下「重新扫描」。
+          const next = scan ? await post('/refresh', {}) : await getState()
           if (!alive.current) return
           setState(next)
           setError('')
         } catch (failure) {
           if (!alive.current) return
+          if (scan) {
+            // 扫描失败不该让整页空着：退回纯读取，至少还能改设置。
+            try {
+              const next = await getState()
+              if (!alive.current) return
+              setState(next)
+              setError('')
+              return
+            } catch {
+              // 连读取也失败：落到下面统一报错。
+            }
+          }
           setError(String(failure?.message ?? failure))
         }
       }, [])
 
-      useEffect(() => { void load() }, [load])
+      useEffect(() => { void load(true) }, [load])
 
       // 倒计时自己走：30 秒重绘一次就够了。
       useEffect(() => {
@@ -679,6 +734,66 @@ window.__ModuleLoader__.load({
         void run('/settings', { templates: next, editedTemplate: next[0].id })
       }, [templates, run])
 
+      /**
+       * 把一个模板里的模型挨个试一遍连接。
+       *
+       * 结果画在下面那张队列卡里，所以先把这张模板切到眼前 —— 不然点了「测试」
+       * 却什么都看不见，只会让人以为按钮坏了。
+       *
+       * 逐个发请求而不是一次全发：一条模板十几个模型、每个都要等网络，一次
+       * 全发等于盯着一个不动的列表等半分钟；逐个发还能各自显示进度。
+       */
+      const probeTemplate = useCallback(async (template) => {
+        const items = Array.isArray(template?.order) ? [...template.order] : []
+        if (items.length === 0) return
+        if (template.id !== settings?.editedTemplate) selectTemplate(template.id)
+        setProbingId(template.id)
+        setProbes((previous) => {
+          const next = { ...previous }
+          for (const item of items) next[keyOf(item.provider, item.model)] = { state: 'busy' }
+          return next
+        })
+        let cursor = 0
+        const worker = async () => {
+          while (cursor < items.length) {
+            const item = items[cursor]
+            cursor += 1
+            const key = keyOf(item.provider, item.model)
+            let row
+            try {
+              const payload = await api('/probe', {
+                method: 'POST',
+                body: { provider: item.provider, model: item.model },
+                // 宿主自己 15 秒就放弃，所以这里的上限要比它宽一点，
+                // 否则先超时的是浏览器，报出来的错就看不出到底是哪一步卡住。
+                timeoutMs: 25_000,
+              })
+              const result = payload?.result ?? {}
+              row = result.ok === true
+                ? { state: 'ok', ms: result.ms }
+                : { state: 'bad', code: result.code ?? 'UNKNOWN', message: result.message ?? '' }
+            } catch (failure) {
+              row = { state: 'bad', code: 'HTTP', message: String(failure?.message ?? failure) }
+            }
+            if (!alive.current) return
+            setProbes((previous) => ({ ...previous, [key]: row }))
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, items.length) }, () => worker()))
+        if (alive.current) setProbingId('')
+      }, [settings, selectTemplate])
+
+      /** 试连接结果的那颗小胶囊：文字与悬停说明。 */
+      const probeText = (row) => (row.state === 'busy' ? t('probeBusy') : row.state === 'ok' ? t('probeOk') : t('probeBad'))
+      const probeHint = (row) => {
+        if (row.state === 'busy') return t('probeRunning')
+        if (row.state === 'ok') return t('probeOkHint', { ms: row.ms ?? 0 })
+        const code = row.code ?? 'UNKNOWN'
+        return row.message === undefined || row.message === ''
+          ? `${t('probeBadHint')} — ${code}`
+          : `${code} — ${row.message}`
+      }
+
       /** 队列里第一个没被隔离的模型 —— 也就是下一个任务会从谁起头。 */
       const startAt = useMemo(() => {
         if (order.length === 0) return undefined
@@ -818,6 +933,8 @@ window.__ModuleLoader__.load({
             onSelect: () => selectTemplate(template.id),
             onRename: (name) => renameTemplate(template.id, name),
             onDelete: () => deleteTemplate(template.id),
+            onProbe: () => void probeTemplate(template),
+            probing: probingId === template.id,
           })),
           div({ className: 'mf-add' },
             h('button', {
@@ -838,6 +955,7 @@ window.__ModuleLoader__.load({
               const key = keyOf(item.provider, item.model)
               const hit = (state.catalog ?? []).find((row) => row.provider === item.provider && row.model === item.model)
               const tally = countsOf(key)
+              const probeRow = probes[key]
               return div({ className: 'mf-row', key },
                 span({ className: 'mf-idx' }, String(index + 1)),
                 // 今天这个模型在全机器上失败了几次、成了几次。红的是失败、绿的是
@@ -848,7 +966,17 @@ window.__ModuleLoader__.load({
                   span({ className: 'mf-good', title: t('goodCountHint') }, String(tally?.ok ?? 0)),
                 ),
                 div({ className: 'mf-main' },
-                  div({ className: 'mf-name' }, hit?.name ?? item.model),
+                  div({ className: 'mf-name' },
+                    hit?.name ?? item.model,
+                    // 试连接的结论紧跟在名字后面，一眼看清哪个通、哪个不通。
+                    probeRow === undefined
+                      ? null
+                      : span({
+                          className: `mf-probe mf-probe-${probeRow.state}`,
+                          title: probeHint(probeRow),
+                          'data-role': 'probe',
+                        }, probeText(probeRow)),
+                  ),
                   div({ className: 'mf-sub' }, `${hit?.providerName ?? item.provider} · ${item.model}`),
                 ),
                 // 思考强度：档位表来自模型自己（resolveModelInfo 的 reasoning），
@@ -1081,7 +1209,7 @@ window.__ModuleLoader__.load({
      * 一个名字要打十几次键盘，那样就是十几次往返，而且每次都会把正在编辑的
      * 模板重置一遍。
      */
-    function TemplateRow({ template, edited, busy, t, canDelete, onSelect, onRename, onDelete }) {
+    function TemplateRow({ template, edited, busy, t, canDelete, onSelect, onRename, onDelete, onProbe, probing }) {
       const [draft, setDraft] = useState(template.name)
       useEffect(() => { setDraft(template.name) }, [template.name])
       const commit = () => {
@@ -1107,6 +1235,14 @@ window.__ModuleLoader__.load({
           div({ className: 'mf-sub' }, `${template.id} · ${t('templateCandidates', { count: template.order.length })}`),
         ),
         div({ className: 'mf-actions' },
+          h('button', {
+            type: 'button',
+            className: 'mf-btn',
+            'data-role': 'template-probe',
+            title: t('templateProbeHint'),
+            disabled: busy || probing || template.order.length === 0,
+            onClick: onProbe,
+          }, probing ? t('probeBusy') : t('templateProbe')),
           h('button', {
             type: 'button',
             className: 'mf-btn',

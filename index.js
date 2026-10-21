@@ -75,6 +75,18 @@ const CONTINUE_DELAY_HARD_LIMIT = 300
 const SAME_MODEL_RETRIES_HARD_LIMIT = MAX_SAME_MODEL_RETRIES
 
 /**
+ * 试连接时的输出上限。
+ *
+ * 试连接只需要证明「连得上、能出字」，不需要它写完一句话。压到 8 个 token，
+ * 一次探测的花销就跟用户随手打一句问候差不多；被截断也算通（说明它在正常
+ * 写字），所以不会因为上限太小而误报失败。
+ */
+const PROBE_MAX_TOKENS = 8
+
+/** 单个模型试连接的等待上限。超过就当作「连不上」，免得一个卡死的供应商拖住整轮测试。 */
+const PROBE_TIMEOUT_MS = 15_000
+
+/**
  * 一个会话最多回给浏览器几条「这一轮是谁在跑」的便签。
  *
  * 接力跑过的每一轮都会留一条，所以给得比较宽 —— 一次拉 200 条也就几十 KB，
@@ -371,6 +383,64 @@ export function apply(ctx, _config) {
     return entries
   }
 
+  /**
+   * 试一次「这个 provider + model 现在能不能出字」。
+   *
+   * 走 `ctx.llm` 直连供应商，**刻意不经过本插件的接力路由**：试连接是一次
+   * 体检，把一个好好的模型记进隔离名单、或者动到撞上限那本账，都是副作用。
+   *
+   * 花销压到最低：一句「hi」加 8 个 token 的输出上限。撞到上限算成功 ——
+   * 那恰恰说明它在正常写字；只有真报错才算不通。结果一律不落盘，页面关掉
+   * 就没了。
+   *
+   * @param {{ provider: string, model: string }} target
+   * @returns {Promise<{ ok: boolean, ms: number, code?: string, message?: string }>}
+   */
+  const probe = async (target) => {
+    const started = Date.now()
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+    let failure
+    try {
+      const stream = ctx.llm.stream({
+        provider: target.provider,
+        model: target.model,
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        maxTokens: PROBE_MAX_TOKENS,
+        signal: controller.signal,
+      })
+      for await (const chunk of stream) {
+        if (chunk?.type !== 'finish') continue
+        const reason = chunk.reason ?? {}
+        if (reason.kind === 'error') {
+          failure = reason.failure ?? { code: 'UNKNOWN', message: '' }
+        } else if (reason.kind === 'aborted' && controller.signal.aborted) {
+          failure = { code: 'TIMEOUT', message: `超过 ${PROBE_TIMEOUT_MS / 1000} 秒没有回应` }
+        }
+        break
+      }
+    } catch (error) {
+      // LlmError 把结构化的东西放在 `failure` 上；别的一律按普通错误读。
+      const inner = error?.failure
+      failure = inner !== undefined && typeof inner === 'object'
+        ? { code: inner.code, message: inner.message }
+        : {
+            code: typeof error?.code === 'string' && error.code !== '' ? error.code : 'UNKNOWN',
+            message: error?.message,
+          }
+    } finally {
+      clearTimeout(timer)
+    }
+    const ms = Date.now() - started
+    if (failure === undefined) return { ok: true, ms }
+    return {
+      ok: false,
+      ms,
+      code: typeof failure.code === 'string' && failure.code !== '' ? failure.code : 'UNKNOWN',
+      message: String(failure.message ?? '').slice(0, 200),
+    }
+  }
+
   void refresh()
     .then(() => bootstrap())
     .catch((error) => {
@@ -574,6 +644,23 @@ export function apply(ctx, _config) {
         await refresh()
         await bootstrap()
         sendJson(res, 200, snapshot(now))
+        return
+      }
+
+      // 试连接：一次只探一个模型，让浏览器那边能各自记进度、各自显示结果。
+      //
+      // 一次全探完再回也可以，但一条模板动辄十几个模型、又串着网络等待，
+      // 用户要盯着一动不动的列表等半分钟。按模型发就没这问题。
+      if (method === 'POST' && path === '/probe') {
+        const body = await readJsonBody(req)
+        const provider = typeof body?.provider === 'string' ? body.provider.trim() : ''
+        const model = typeof body?.model === 'string' ? body.model.trim() : ''
+        if (provider === '' || model === '') {
+          sendJson(res, 400, { ok: false, error: '试连接需要 provider 和 model' })
+          return
+        }
+        const result = await probe({ provider, model })
+        sendJson(res, 200, { ok: true, result: { provider, model, ...result } })
         return
       }
 

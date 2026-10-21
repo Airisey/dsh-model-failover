@@ -161,6 +161,8 @@ function createLlm(scripts) {
       calls.push({
         key,
         messages: options.messages,
+        // 记下来是为了盯「试连接」的花销：那边必须把输出上限压到个位数。
+        maxTokens: options.maxTokens,
         // `hadEffort` 区分「没带这个字段」和「带了个 undefined」—— 后者会顺着
         // 展开把上一轮的档位漏给别的模型，是要专门防住的那种。
         effort: options.reasoningEffort,
@@ -1322,6 +1324,46 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
 
     const unknown = await call('GET', '/api/dsh-model-failover/nope')
     assert.equal(unknown.status, 404)
+
+    // ── 试连接 ──────────────────────────────────────────────────────────────
+    // 走 ctx.llm 直连供应商，刻意**不经过本插件的接力路由**：体检不该把一个
+    // 好好的模型记进隔离名单，也不该动撞上限那本账。
+    const beforeProbe = await call('GET', '/api/dsh-model-failover/state')
+    const callsBeforeProbe = llm.calls.length
+
+    const goodProbe = await call('POST', '/api/dsh-model-failover/probe', { provider: 'alpha', model: 'one' })
+    assert.equal(goodProbe.status, 200)
+    assert.equal(goodProbe.json.ok, true)
+    assert.equal(goodProbe.json.result.ok, true, 'alpha/one 有脚本，应当探通')
+    assert.equal(goodProbe.json.result.provider, 'alpha')
+    assert.equal(typeof goodProbe.json.result.ms, 'number')
+
+    // beta/one 在这套假宿主里没有脚本 —— 正好当「探不通」的那一侧。
+    const badProbe = await call('POST', '/api/dsh-model-failover/probe', { provider: 'beta', model: 'one' })
+    assert.equal(badProbe.status, 200)
+    assert.equal(badProbe.json.result.ok, false)
+    assert.equal(badProbe.json.result.code, 'NO_ADAPTER', '失败要把错误码带回来')
+    assert.match(badProbe.json.result.message, /没有为 .* 准备脚本/)
+
+    const probeCalls = llm.calls.slice(callsBeforeProbe)
+    assert.deepEqual(probeCalls.map((row) => row.key), [routeKey('alpha', 'one'), routeKey('beta', 'one')], '探测要直达供应商，不能借道 model-failover')
+    for (const row of probeCalls) {
+      // 花销：一句「hi」加 8 个 token 的输出上限。这两条一起才是「试连接很便宜」。
+      assert.equal(row.maxTokens, 8, '试连接必须把输出上限压到个位数')
+      assert.equal(row.messages.length, 1, '只发一句话，别把整段对话塞进去')
+      assert.equal(row.messages[0].content[0].text, 'hi')
+      // 试连接不指定档位：它只回答「连不连得上」，不该顺带改变档位语义。
+      assert.equal(row.effort, undefined)
+    }
+
+    const afterProbe = await call('GET', '/api/dsh-model-failover/state')
+    assert.deepEqual(afterProbe.json.counts, beforeProbe.json.counts, '试连接不该动红绿计数')
+    assert.deepEqual(afterProbe.json.quarantined, beforeProbe.json.quarantined, '试连接不该隔离任何模型')
+    assert.equal(afterProbe.json.events.length, beforeProbe.json.events.length, '试连接不该往事件日志里写东西')
+
+    const incompleteProbe = await call('POST', '/api/dsh-model-failover/probe', { provider: 'alpha' })
+    assert.equal(incompleteProbe.status, 400, '缺 model 必须拒绝，不能拿空字符串去探')
+    assert.equal(incompleteProbe.json.ok, false)
 
     // ── 请求准入 ────────────────────────────────────────────────────────────
     // 本路由比内核的 `/api` 长，最长前缀胜出，所以内核那条里的鉴权不会跑；

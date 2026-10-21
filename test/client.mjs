@@ -1045,10 +1045,18 @@ globalThis.fetch = async (url, init = {}) => {
 
 const tree = await runtime.mount(page(props))
 
-await check('挂载后自动 GET /state，并把队列、提供者名、数据目录渲染出来', () => {
+await check('挂载后先 POST /refresh 自动扫一次目录，并把队列、提供者名、数据目录渲染出来', () => {
+  // 打开设置页就重扫一次：新接进来的 provider、新登录的账号进来就该在清单里，
+  // 不该先让用户去点一下「重新扫描」。扫描回的是一整份快照，所以不用再拉 /state。
+  assert.deepEqual(requests[0], {
+    method: 'POST',
+    url: '/api/dsh-model-failover/refresh',
+    body: {},
+  })
   assert.deepEqual(
     requests.filter((row) => row.method === 'GET').map((row) => row.url),
-    ['/api/dsh-model-failover/state'],
+    [],
+    '扫描回的已经是快照，不该再单独拉一次 /state',
   )
   const flat = runtime.text(tree)
   assert.ok(flat.includes('Alpha One'), '应显示第一个候选的模型名')
@@ -1624,6 +1632,84 @@ await check('队列模板：新建模板给一个新 id 并自动切过去', asy
   assert.match(created.name, /^templateNewName \d+$/, `实际是 ${created.name}`)
   assert.deepEqual(created.order, [])
   assert.equal(body.editedTemplate, created.id, '建完自动切过去')
+})
+
+// ── 试连接 ──────────────────────────────────────────────────────────────────
+//
+// 每个模板一颗「测试连接」：点了把这条队列里的模型挨个探一遍，结果显示在下面
+// 每个模型名字后面。结果只活在组件里，关掉设置页就没了 —— 所以这里同时断言
+// 它**没有**写回宿主：一次体检的结论过几分钟就可能不准，留着只会误导人。
+
+await check('试连接：每个模板一颗按钮，点了逐个探这条队列，结果显示在模型名后面', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const asked = []
+  globalThis.fetch = async (url, options = {}) => {
+    const target = String(url)
+    const body = options.body === undefined ? undefined : JSON.parse(options.body)
+    asked.push({ url: target, method: options.method ?? 'GET', body })
+    if (target.includes('/probe')) {
+      // gamma/two 故意探不通，用来看红胶囊那一侧画得对不对。
+      return payloadResponse(body.model === 'two'
+        ? { ok: true, result: { ...body, ok: false, code: 'QUOTA', message: '余额不足', ms: 12 } }
+        : { ok: true, result: { ...body, ok: true, ms: 30 } })
+    }
+    return payloadResponse(initialState())
+  }
+  let badges
+  try {
+    await fresh.mount(page({ close() {}, t }))
+    const buttons = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-probe')
+    assert.equal(buttons.length, 2, '两条模板各一颗')
+    assert.equal(buttons[0].props.disabled, false, '默认模板里有模型，能测')
+    assert.equal(buttons[1].props.disabled, true, '空队列没得测，按钮该是灰的')
+
+    await buttons[0].props.onClick()
+    await fresh.mount(page({ close() {}, t }))
+    badges = fresh.nodes.filter((node) => node.props?.['data-role'] === 'probe')
+  } finally {
+    globalThis.fetch = saved
+  }
+
+  const probes = asked.filter((row) => row.url.includes('/probe'))
+  assert.deepEqual(
+    probes.map((row) => `${row.body.provider}/${row.body.model}`),
+    ['alpha/one', 'beta/one', 'gamma/two'],
+    '这条队列里的模型应当各探一次',
+  )
+  assert.equal(probes.every((row) => row.method === 'POST'), true)
+  // 花销：一次只发一句「hi」，输出上限 8 个 token —— 这个断言盯的是客户端
+  // 别把整段对话塞进去（真正压 token 的是宿主那份请求）。
+  assert.equal(
+    asked.filter((row) => row.url.includes('/settings')).length,
+    0,
+    '试连接的结果不落盘，一次设置写入都不该有',
+  )
+
+  assert.equal(badges.length, 3, '每个模型名字后面挂一颗')
+  assert.deepEqual(
+    badges.map((badge) => badge.props.className),
+    ['mf-probe mf-probe-ok', 'mf-probe mf-probe-ok', 'mf-probe mf-probe-bad'],
+  )
+  assert.deepEqual(badges.map((badge) => badge.text), ['通', '通', '不通'])
+  assert.equal(badges[0].props.title, '30 毫秒收到回应')
+  assert.equal(badges[2].props.title, 'QUOTA — 余额不足', '不通的那颗要说清是什么错')
+})
+
+await check('试连接：连不上时按钮仍是灰的，不给点空队列', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => payloadResponse(initialState())
+  let buttons
+  try {
+    await fresh.mount(page({ close() {}, t }))
+    buttons = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-probe')
+  } finally {
+    globalThis.fetch = saved
+  }
+  // 没测之前不该有任何胶囊：结果只属于「测过的那一次」，不是常驻标记。
+  assert.equal(buttons.length, 2)
+  assert.equal(fresh.nodes.filter((node) => node.props?.['data-role'] === 'probe').length, 0)
 })
 
 await check('卸载时 effect 的清理函数把样式表收回去', () => {
