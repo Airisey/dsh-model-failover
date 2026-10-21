@@ -190,14 +190,14 @@ export function normalizeSettings(raw) {
       ? Math.min(source.continueDelaySec, CONTINUE_DELAY_HARD_LIMIT)
       : DEFAULT_SETTINGS.continueDelaySec
 
-  // 同样允许 0（= 每个模型只试一次，回到更早的行为）。老配置里没有这个键，
-  // 就按那个布尔开关折算，免得升级后行为悄悄变了。
+  // 允许 0（= 每个模型只试一次）。**不再从 `retrySameModelOnce` 折算**：那个
+  // 老开关管的是「用同一句『继续』再催一遍」，那件事已经整个没了；新键管的是
+  // 「把请求原样重发去换账号」，是另一回事。硬把 false 折成 0 会让升级上来的
+  // 人悄悄少掉换账号的机会 —— 本机就真发生过一次，功能上线当天就被迁成关。
   const sameModelRetries =
     Number.isInteger(source.sameModelRetries) && source.sameModelRetries >= 0
       ? Math.min(source.sameModelRetries, SAME_MODEL_RETRIES_HARD_LIMIT)
-      : source.retrySameModelOnce === false
-        ? 0
-        : DEFAULT_SETTINGS.sameModelRetries
+      : DEFAULT_SETTINGS.sameModelRetries
 
   return {
     enabled: source.enabled !== false,

@@ -103,7 +103,9 @@ provider+model，想让它换个人来答，唯一的办法就是把这个请求
 **第一次失败也一样等**。这一等不是拖延：刚撞完限流或上游抖动的模型，隔 0.2 秒再戳一次
 只会再撞一次，除了把队列挨个隔离掉没有任何收益（实测里最难看的一段是 9 秒内落了 12 条隔离）。
 等待期间你按了停止、自己先发了一句、或者那一轮已经跑完，插件就收手不再补。
-等待同样管着适配器里「换个候选 / 同模型重发」那一跳，所以整个接力的节奏都被这一个数字管着。
+等待只发生在**带「继续」的那些跳**前面。所以队首那个模型的几次原样重发是不等的 ——
+它前面没有任何失败，等它只会让第一次调用平白慢几秒；而一旦换到队列里第二个候选，
+那一跳起每次都带「继续」，也就每次都要等一等。
 
 **本机网络没通的时候也不会补发。** 这条单独拿出来说，是因为本机网络故障在 DSH 里
 **没有专属错误码**：DNS 解析不了、代理没起来、证书被本机拦截，各家适配器会分别报成
@@ -212,6 +214,7 @@ provider+model，想让它换个人来答，唯一的办法就是把这个请求
 DSH 异常（开关、两种触发、两个分开的次数上限、等待秒数）、事件日志（列表本身 + 记不记、
 留多少条）。设置页里能改的都存在 `settings.json`；重置时间支持 0-23 的整点。默认值：
 `resetHour: 1`、`retrySameModelOnce: true`、`continueText: "继续"`、`retryWhenAllQuarantined: true`、
+`sameModelRetries: 2`、
 `autoContinue: true`、`autoContinueOnFailure: true`、`autoContinueOnMaxTokens: true`、
 `autoContinueFailureLimit: 1`、`autoContinueMaxTokensLimit: 10`、
 `continueDelaySec: 5`、`keepEventLog: true`、`eventLogLimit: 200`。
@@ -224,14 +227,15 @@ DSH 异常（开关、两种触发、两个分开的次数上限、等待秒数�
 但键本身仍然有效：`settings.json` 里已经写下的值照旧被读取，没写就按默认值（`true` / `"继续"`）。
 要改就直接编辑文件，重启后生效。
 
-`retrySameModelOnce` 现在只在一处还有影响：**老配置里没有 `sameModelRetries` 这个键时**，
-它被拿来折算次数（关掉过 = 每个模型只试一次，否则用默认的 2）。一旦文件里写了
-`sameModelRetries`，这个布尔开关就完全不管事了。
+`retrySameModelOnce` 管的是「用同一句『继续』再催一遍」，那件事已经被
+`sameModelRetries`（原样重发去换账号）整个取代了，所以这个布尔开关**不再影响次数**：
+老配置里哪怕写着 `false`，也不会把新的重试次数折成 0。真想要「每个模型只试一次」，
+把 `sameModelRetries` 显式写成 `0`。
 
 ## 开发
 
 ```
-node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线、补发节奏、轮尾便签、撞上限换人、按会话隔离、模板即模型、隔离按会话×模板、红绿计数、/sessions、按会话解除、同模型重发（51 项）
+node test/smoke.mjs        # 宿主半身：接力、隔离、复活、档位、契约、自动继续接线、补发节奏、轮尾便签、撞上限换人、按会话隔离、模板即模型、隔离按会话×模板、红绿计数、/sessions、按会话解除、同模型重发（52 项）
 node test/client.mjs       # 浏览器半身：真渲染设置页 + 真发请求 + 队列模板增删改 + 红绿数字 + 轮尾小字 + 会话页隔离队列（置顶/模板名/逐行解除）+ 同模型重试次数（54 项）
 node test/real-host.mjs    # 挂进真的 dsh-llm 注册表跑一遍，含档位校验（12 项）
 node test/autocontinue.mjs # 自动「继续」的判定、两个独立上限、节流与等待、本机网络判据、轮尾便签、同模型重试次数归一（59 项）

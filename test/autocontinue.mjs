@@ -795,14 +795,18 @@ await check('同模型重试次数：0 合法，负数 / 小数 / 字符串回�
   assert.equal(normalizeSettings({}).sameModelRetries, 2, '没写过就用默认值')
 })
 
-await check('同模型重试次数：老配置靠 retrySameModelOnce 折算，读过新键之后旧开关就失效', () => {
-  assert.equal(normalizeSettings({ retrySameModelOnce: false }).sameModelRetries, 0, '老配置关掉过「多试一次」→ 每个模型只试一次')
-  assert.equal(normalizeSettings({ retrySameModelOnce: true }).sameModelRetries, 2, '老配置开着 → 用新的默认值')
+await check('同模型重试次数：旧开关 retrySameModelOnce 不再折算成次数', () => {
+  // 老开关管的是「用同一句『继续』再催一遍」，那件事已经整个没了；新键管的是
+  // 「把请求原样重发去换账号」。硬把 false 折成 0 会让升级上来的人悄悄少掉
+  // 换账号的机会，所以这里刻意断言它**不**影响新键。
+  assert.equal(normalizeSettings({ retrySameModelOnce: false }).sameModelRetries, 2, '旧开关关了也不该把新默认值折成 0')
+  assert.equal(normalizeSettings({ retrySameModelOnce: true }).sameModelRetries, 2, '旧开关开着同样是默认值')
   assert.equal(
     normalizeSettings({ retrySameModelOnce: false, sameModelRetries: 4 }).sameModelRetries,
     4,
-    '新键写了就以新键为准，旧布尔开关不再管用',
+    '新键写了就以新键为准',
   )
+  assert.equal(normalizeSettings({ retrySameModelOnce: false, sameModelRetries: 0 }).sameModelRetries, 0, '真想要 0 就显式写 0')
 })
 
 await check('同模型重试次数能被往返序列化，且 0 不会在往返里变回默认值', () => {

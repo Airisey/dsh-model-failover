@@ -872,8 +872,24 @@ await check('补发节奏：每次「继续」之前都先等一等，首次请�
   })
   const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
   assert.equal(textOf(chunks), '好')
-  // 三次带「继续」的跳（第二、三个模型），每跳之前各等一次；首发不等。
+  // 两次带「继续」的跳（第二、三个模型），每跳之前各等一次；首发不等。
   assert.deepEqual(h.waits, [5000, 5000], '每个带「继续」的跳都该等一次')
+})
+
+await check('补发节奏：同模型原样重发不等，只有带「继续」的跳才等', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    settings: { sameModelRetries: 2 },
+    scripts: new Map([[routeKey('alpha', 'one'), quota()], [routeKey('beta', 'one'), ok('好')]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [] }))
+  assert.equal(textOf(chunks), '好')
+  // alpha 首发 + 两次原样重发都不等（它们带 0 条「继续」）；换到 beta 那一跳才等一次。
+  assert.deepEqual(commands(h.llm), [
+    routeKey('alpha', 'one'), routeKey('alpha', 'one'), routeKey('alpha', 'one'),
+    routeKey('beta', 'one'),
+  ])
+  assert.deepEqual(h.waits, [5000], '只有换人那一跳在等')
 })
 
 await check('补发节奏：0 秒 = 不等待，回到旧行为', async () => {
