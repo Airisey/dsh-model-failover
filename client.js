@@ -67,7 +67,9 @@ window.__ModuleLoader__.load({
 .mf-row:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
 .mf-idx { width: 20px; text-align: right; opacity: .5; font-variant-numeric: tabular-nums; }
 .mf-main { flex: 1; min-width: 0; }
-.mf-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mf-name { display: flex; align-items: center; font-weight: 500; }
+/* 名字本身会被截断，但试连接的胶囊必须一直在 —— 它才是这一行要看的结论。 */
+.mf-name-text { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mf-sub { opacity: .55; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mf-badge { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); opacity: .8; }
 .mf-badge.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; opacity: 1; }
@@ -967,7 +969,7 @@ window.__ModuleLoader__.load({
                 ),
                 div({ className: 'mf-main' },
                   div({ className: 'mf-name' },
-                    hit?.name ?? item.model,
+                    span({ className: 'mf-name-text' }, hit?.name ?? item.model),
                     // 试连接的结论紧跟在名字后面，一眼看清哪个通、哪个不通。
                     probeRow === undefined
                       ? null
