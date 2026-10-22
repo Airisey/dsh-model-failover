@@ -131,6 +131,9 @@ window.__ModuleLoader__.load({
 .mf-qv-item.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
 .mf-qv-item.mf-ok { border-color: color-mix(in srgb, #30a46c 55%, transparent); color: #30a46c; }
 .mf-qv-item > .mf-qv-code { opacity: .65; }
+/* 输出速度：蓝框蓝字，紧跟在模型名后面。跟红/绿胶囊并排，一眼分清「今天行不行」
+   和「用起来多快」是两个问题。 */
+.mf-speed { flex: none; border: 1px solid #4c9aff; color: #4c9aff; border-radius: 5px; padding: 0 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
 /* 隔离名单的一行：主行 +（展开时）下面的报错详情。单开一层是为了不动 .mf-row 的
    单行布局 —— 里面塞不下会换行的正文。 */
 .mf-qrow { display: flex; flex-direction: column; }
@@ -266,6 +269,7 @@ window.__ModuleLoader__.load({
         qvUnnamed: '未命名会话',
         qvUnscoped: '后台任务（不挂在任何会话下）',
         qvDay: '当前逻辑日 {day}',
+        qvSpeedHint: '最近一趟跑出 {tokens} 个输出 token，用了 {ms} 毫秒',
         qvTemplate: '模板「{name}」',
       },
       en: {
@@ -392,6 +396,7 @@ window.__ModuleLoader__.load({
         qvUnnamed: 'Untitled conversation',
         qvUnscoped: 'Background work (not tied to a conversation)',
         qvDay: 'Logical day {day}',
+        qvSpeedHint: 'Last run produced {tokens} output tokens in {ms} ms',
         qvTemplate: 'template “{name}”',
       },
     }
@@ -1377,6 +1382,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 把一趟的输出速度写成 `42.1 tok/s`。
+     *
+     * 一位小数够用了：这个数字是拿来看「这个模型今天在这个会话里大概多快」的，
+     * 差零点几毫无意义，位数多了只会占地方。快到三位数就干脆不要小数 ——
+     * 那时候小数点后那位更没有信息量。
+     *
+     * 拿不到有效数字就返回 `undefined`，调用方据此什么都不画：宁可空着，也不
+     * 让界面上出现 `NaN tok/s` 或者一个凭空的 `0.0`。
+     */
+    function speedText(speed) {
+      const tokens = speed?.tokens
+      const ms = speed?.ms
+      if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return undefined
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined
+      const perSec = tokens / (ms / 1000)
+      if (!Number.isFinite(perSec) || perSec <= 0) return undefined
+      return `${perSec >= 100 ? perSec.toFixed(0) : perSec.toFixed(1)} tok/s`
+    }
+
+    /**
      * 一栏里的一行会话。
      *
      * `useSessions` 由宿主以标准 hook 属性注入（dsh-client-ui-session 的
@@ -1391,6 +1416,17 @@ window.__ModuleLoader__.load({
       const activeTemplate = typeof active?.templateName === 'string' && active.templateName !== ''
         ? active.templateName
         : undefined
+      // 每个模型胶囊后面跟一个蓝色小框写它的输出速度 —— 已隔离和已验证都要，
+      // 因为「它多快」和「它今天行不行」是两个独立的问题：一个被隔离的模型
+      // 可能刚才还跑得飞快（只是最后撞了额度），而那正是值得知道的信息。
+      const speedChip = (item) => {
+        const text = speedText(item?.speed)
+        if (text === undefined) return null
+        return span({
+          className: 'mf-speed',
+          title: t('qvSpeedHint', { tokens: item.speed.tokens, ms: Math.round(item.speed.ms) }),
+        }, text)
+      }
       return div({ className: mine ? 'mf-qv-session mf-mine' : 'mf-qv-session' },
         div({ className: 'mf-qv-top' },
           span({ className: 'mf-qv-title' }, title === undefined || title === '' ? t('qvUnnamed') : title),
@@ -1431,6 +1467,7 @@ window.__ModuleLoader__.load({
                     ? null
                     : span({ className: 'mf-qv-code' }, ` · ${templateName(item.templateId)}`),
                   span({ className: 'mf-qv-code' }, ` · ${codeText(item.code) || String(item.code ?? '?')} · ${stamp(item.at)}`),
+                  speedChip(item),
                 )),
               ),
         ),
@@ -1442,7 +1479,7 @@ window.__ModuleLoader__.load({
                 ...good.map((item) => h('span', {
                   className: 'mf-qv-item mf-ok',
                   key: `${item.key ?? ''}\u0000${item.templateId ?? ''}`,
-                }, sessionItemLabel(item))),
+                }, sessionItemLabel(item), speedChip(item))),
               ),
             ),
       )

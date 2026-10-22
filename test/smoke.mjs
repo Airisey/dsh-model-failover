@@ -1125,6 +1125,60 @@ await check('红绿计数：失败一次记一次、成功一次记一次，跨�
   assert.deepEqual(counts, { fail: 1, ok: 2 }, `实际是 ${JSON.stringify(counts)}`)
 })
 
+await check('输出速度：从第一个 token 到结束，排队与首字延迟不算进去', async () => {
+  const alphaKey = routeKey('alpha', 'one')
+  const scripts = new Map()
+  const h = await harness({ order: [{ provider: 'alpha', model: 'one' }], scripts })
+  // 先空转 5 秒：这一段是排队 + 等首字，属于延迟而不是速度。
+  h.clock.ms += 5000
+  scripts.set(alphaKey, async function* () {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: '写完了' }
+    // 真正在写字的 2 秒里吐了 100 个 token → 50 tok/s。
+    h.clock.ms += 2000
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 100 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('写')], sessionId: 'sess-speed' }))
+
+  const view = h.health.view(h.clock.ms, 1)
+  const row = view.sessions.find((group) => group.sessionId === 'sess-speed')?.good?.[0]
+  assert.equal(row?.speed?.tokens, 100, '要带上这一趟的输出 token 数')
+  assert.equal(row?.speed?.ms, 2000, `2 秒，不是 7 秒 —— 实际 ${row?.speed?.ms}`)
+  assert.equal(view.speeds['sess-speed'][alphaKey].tokens, 100, '速度按会话存一份')
+})
+
+await check('输出速度：一个 token 都没吐、或者没有 usage 的供应商，不留假数字', async () => {
+  const alphaKey = routeKey('alpha', 'one')
+  const scripts = new Map()
+  const h = await harness({ order: [{ provider: 'alpha', model: 'one' }], scripts })
+  h.clock.ms += 1000
+  // 吐了字，但供应商没给 usage：算不出 token 数，就不该记。
+  scripts.set(alphaKey, async function* () {
+    yield { type: 'text-delta', index: 0, text: '写了但没报数' }
+    h.clock.ms += 500
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('写')], sessionId: 'sess-nousage' }))
+
+  const view = h.health.view(h.clock.ms, 1)
+  const row = view.sessions.find((group) => group.sessionId === 'sess-nousage')?.good?.[0]
+  assert.equal(row?.speed, undefined, '没有 usage 就不记速度')
+  assert.equal(view.speeds['sess-nousage'], undefined)
+
+  // 压缩会话这类内部调用同样不记：它跟用户等的那一轮无关，速度也不具代表性。
+  scripts.set(alphaKey, async function* () {
+    yield { type: 'text-delta', index: 0, text: '标题：写点什么' }
+    h.clock.ms += 300
+    yield { type: 'usage', usage: { inputTokens: 5, outputTokens: 9 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  await drain(h.adapter.stream({
+    provider: ROUTE, model: 'default', messages: [user('写')], sessionId: 'sess-purpose', purpose: 'session-title',
+  }))
+  assert.equal(h.health.view(h.clock.ms, 1).speeds['sess-purpose'], undefined, '起标题的速度不该记账')
+})
+
 // 13 · 宿主半身的设置接口
 await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填充', async () => {
   const freshHome = mkdtempSync(join(tmpdir(), 'model-failover-host-'))

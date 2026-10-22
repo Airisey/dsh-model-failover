@@ -739,6 +739,42 @@ await check('隔离队列：每个会话那行写明它在用哪个模板', asyn
   assert.ok(flat.includes('默认模板'), '另一个会话仍写它的模板名')
 })
 
+await check('隔离队列：已隔离和已验证的模型后面各跟一个蓝框写输出速度', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const speedChips = (runtime) => runtime.nodes.filter((node) => node.props?.className === 'mf-speed')
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({
+      sessionId: 's-mine',
+      quarantined: [
+        // 120 个 token 写了 3 秒 → 40.0 tok/s。
+        { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId: 's-mine', label: 'Code99 · Beta One', speed: { tokens: 120, ms: 3000, at } },
+        // 这个模型一个 token 都没吐出来，没有速度可画。
+        { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'SERVER', message: '挂了', at, sessionId: 's-mine', label: 'FutureHub · Gamma Two' },
+      ],
+      good: [
+        // 一秒 250 个 token：三位数就不要再带小数点了。
+        { key: KEY('alpha', 'one'), provider: 'alpha', model: 'one', at, sessionId: 's-mine', label: '硅基流动 · Alpha One', speed: { tokens: 250, ms: 1000, at } },
+      ],
+    }),
+  ])
+  let chips
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+    chips = speedChips(fresh)
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.deepEqual(chips.map((node) => node.text), ['40.0 tok/s', '250 tok/s'], '两个有速度的模型各一个框，没有的不画空框')
+  assert.ok(
+    chips[0].props.title.includes('120') && chips[0].props.title.includes('3000'),
+    `悬停要报原始的 token 数与毫秒数，实际是 ${chips[0].props.title}`,
+  )
+  assert.equal(fresh.nodes.some((node) => node.text.includes('NaN')), false, '算不出速度也不许出现 NaN')
+  assert.ok(flat.includes('40.0 tok/s'))
+})
+
 await check('隔离队列：当前会话那一行有标记，别的会话没有', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
