@@ -1145,7 +1145,25 @@ await check('输出速度：从第一个 token 到结束，排队与首字延迟
   const row = view.sessions.find((group) => group.sessionId === 'sess-speed')?.good?.[0]
   assert.equal(row?.speed?.tokens, 100, '要带上这一趟的输出 token 数')
   assert.equal(row?.speed?.ms, 2000, `2 秒，不是 7 秒 —— 实际 ${row?.speed?.ms}`)
+  assert.equal(row?.speed?.runs, 1, '一趟就记一趟')
   assert.equal(view.speeds['sess-speed'][alphaKey].tokens, 100, '速度按会话存一份')
+
+  // 第二趟：累计而不是覆盖。累计后再除，和 dsh 自己那个「输出速度（TPS）」
+  // 一个口径 —— 每趟的速度取平均会让很短的样本权重过大。
+  h.clock.ms += 1000
+  scripts.set(alphaKey, async function* () {
+    yield { type: 'text-delta', index: 0, text: '又写了一段' }
+    h.clock.ms += 1000
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 50 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  await drain(h.adapter.stream({ provider: ROUTE, model: 'default', messages: [user('再写')], sessionId: 'sess-speed' }))
+
+  const after = h.health.view(h.clock.ms, 1).speeds['sess-speed'][alphaKey]
+  assert.equal(after.tokens, 150, '第二趟要加上去，不是覆盖')
+  assert.equal(after.ms, 3000, '毫秒也要加起来')
+  assert.equal(after.runs, 2, '趟数跟着涨')
+  assert.equal(Math.round(after.tokens / (after.ms / 1000)), 50, '累计下来是 50 tok/s')
 })
 
 await check('输出速度：一个 token 都没吐、或者没有 usage 的供应商，不留假数字', async () => {

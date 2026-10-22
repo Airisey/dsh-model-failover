@@ -74,6 +74,7 @@ window.__ModuleLoader__.load({
 .mf-badge { flex: none; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); opacity: .8; }
 .mf-badge.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; opacity: 1; }
 .mf-badge.mf-ok { border-color: color-mix(in srgb, #30a46c 55%, transparent); color: #30a46c; opacity: 1; }
+.mf-badge.mf-run { border-color: color-mix(in srgb, #4c9aff 55%, transparent); color: #4c9aff; opacity: 1; }
 .mf-actions { display: flex; gap: 4px; flex: none; }
 /* 正在编辑的那个模板：左边一条竖线，比整行换底色更不刺眼。 */
 .mf-row-on { background: color-mix(in srgb, currentColor 6%, transparent); box-shadow: inset 2px 0 0 currentColor; }
@@ -266,10 +267,12 @@ window.__ModuleLoader__.load({
         qvQuarantined: '已隔离',
         qvQueued: '已验证',
         qvCurrent: '当前会话',
+        qvRunning: '运行中',
         qvUnnamed: '未命名会话',
         qvUnscoped: '后台任务（不挂在任何会话下）',
         qvDay: '当前逻辑日 {day}',
-        qvSpeedHint: '最近一趟跑出 {tokens} 个输出 token，用了 {ms} 毫秒',
+        qvSpeedHint: '本会话累计跑出 {tokens} 个输出 token，扣掉排队和首字延迟后用了 {ms} 毫秒',
+        qvSpeedHintRuns: '本会话累计 {runs} 趟、共 {tokens} 个输出 token，扣掉排队和首字延迟后用了 {ms} 毫秒',
         qvTemplate: '模板「{name}」',
       },
       en: {
@@ -393,10 +396,12 @@ window.__ModuleLoader__.load({
         qvQuarantined: 'Quarantined',
         qvQueued: 'Verified',
         qvCurrent: 'This conversation',
+        qvRunning: 'Running',
         qvUnnamed: 'Untitled conversation',
         qvUnscoped: 'Background work (not tied to a conversation)',
         qvDay: 'Logical day {day}',
-        qvSpeedHint: 'Last run produced {tokens} output tokens in {ms} ms',
+        qvSpeedHint: 'This conversation produced {tokens} output tokens in {ms} ms, excluding queueing and time to first token',
+        qvSpeedHintRuns: 'This conversation ran {runs} times for {tokens} output tokens in {ms} ms, excluding queueing and time to first token',
         qvTemplate: 'template “{name}”',
       },
     }
@@ -1364,6 +1369,14 @@ window.__ModuleLoader__.load({
      * 只是挂在那里没人看，问得太勤纯属浪费。手动点「刷新」随时能立刻拉一次。
      */
     const QV_POLL_MS = 15000
+    /**
+     * 有会话正在跑时的轮询间隔。
+     *
+     * 速度数字要「实时」，靠的就是这个：每一趟结束时宿主的累计值才跳一下，而
+     * 一趟可能跑几十秒 —— 15 秒的间隔会让它看起来像回放。2 秒足够跟上，也不至于
+     * 让这一栏变成一个请求放大器（闲下来立刻退回 15 秒）。
+     */
+    const QV_POLL_MS_ACTIVE = 2000
 
     /**
      * 某个模型的显示名。`/sessions` 已经把 `label` 拼好了，这里只兜底。
@@ -1384,9 +1397,12 @@ window.__ModuleLoader__.load({
     /**
      * 把一趟的输出速度写成 `42.1 tok/s`。
      *
-     * 一位小数够用了：这个数字是拿来看「这个模型今天在这个会话里大概多快」的，
-     * 差零点几毫无意义，位数多了只会占地方。快到三位数就干脆不要小数 ——
-     * 那时候小数点后那位更没有信息量。
+     * 口径照抄 dsh 自己那个「输出速度（TPS）」：先把每一趟的 `decodeTokens` 与
+     * 「首字到结束」的毫秒数分别加起来，最后再除；显示上也一样 ——
+     * **两位数以上取整，个位数保留一位小数**（官方 `formatTokensPerSecond` 就是
+     * `>= 10 ? Math.round : toFixed(1)`）。个位数保留小数是因为「3.4 tok/s」和
+     * 「3 tok/s」差的三分之一是能感觉到的，而「247.3」和「247」之间的零点三
+     * 没有任何意义。
      *
      * 拿不到有效数字就返回 `undefined`，调用方据此什么都不画：宁可空着，也不
      * 让界面上出现 `NaN tok/s` 或者一个凭空的 `0.0`。
@@ -1396,9 +1412,9 @@ window.__ModuleLoader__.load({
       const ms = speed?.ms
       if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return undefined
       if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined
-      const perSec = tokens / (ms / 1000)
-      if (!Number.isFinite(perSec) || perSec <= 0) return undefined
-      return `${perSec >= 100 ? perSec.toFixed(0) : perSec.toFixed(1)} tok/s`
+      const clamped = Math.max(0, tokens / (ms / 1000))
+      if (!Number.isFinite(clamped)) return undefined
+      return `${clamped >= 10 ? String(Math.round(clamped)) : clamped.toFixed(1)} tok/s`
     }
 
     /**
@@ -1422,14 +1438,21 @@ window.__ModuleLoader__.load({
       const speedChip = (item) => {
         const text = speedText(item?.speed)
         if (text === undefined) return null
+        const runs = Number.isInteger(item.speed.runs) && item.speed.runs > 1 ? item.speed.runs : undefined
         return span({
           className: 'mf-speed',
-          title: t('qvSpeedHint', { tokens: item.speed.tokens, ms: Math.round(item.speed.ms) }),
+          title: runs === undefined
+            ? t('qvSpeedHint', { tokens: item.speed.tokens, ms: Math.round(item.speed.ms) })
+            : t('qvSpeedHintRuns', { tokens: item.speed.tokens, ms: Math.round(item.speed.ms), runs }),
         }, text)
       }
+      // 此刻正在跑：这一栏要能一眼看出「有人在写字」，因为速度数字只在每一趟
+      // 结束时才跳一下，中间那几十秒光看数字是看不出还在跑的。
+      const running = row?.running
       return div({ className: mine ? 'mf-qv-session mf-mine' : 'mf-qv-session' },
         div({ className: 'mf-qv-top' },
           span({ className: 'mf-qv-title' }, title === undefined || title === '' ? t('qvUnnamed') : title),
+          running === undefined ? null : span({ className: 'mf-badge mf-run' }, t('qvRunning')),
           mine ? span({ className: 'mf-badge mf-ok' }, t('qvCurrent')) : null,
           span({ className: 'mf-qv-id' }, shortId(row?.sessionId)),
           // 解除按钮就在这一行上：解哪个会话的隔离，按钮长在哪个会话上最没歧义。
@@ -1447,7 +1470,8 @@ window.__ModuleLoader__.load({
           // 模板名跟着模型一起报：同一个模型可能同时挂在好几条模板的队列里，
           // 只说模型名答不了「这个会话现在跑的是哪条队列」。
           span({ className: 'mf-qv-value' }, active === undefined
-            ? t('none')
+            // 还没跑完任何一趟的会话（刚开的对话）只有实时表知道它在用谁。
+            ? (running === undefined ? t('none') : sessionItemLabel(running))
             : `${sessionItemLabel(active)}${activeTemplate === undefined ? '' : ` · ${t('qvTemplate', { name: activeTemplate })}`}`),
         ),
         div({ className: 'mf-qv-line' },
@@ -1524,16 +1548,27 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      // 有没有会话正在跑 —— 决定轮询快慢，也决定要不要在行上挂「运行中」。
+      const running = (data?.sessions ?? []).some((row) => row?.running !== undefined)
+
       useEffect(() => {
         alive.current = true
         void load(true)
-        // 会话在跑的时候这一栏要跟着变（换模型、被隔离），所以自己轮询。
-        const timer = setInterval(() => { void load(false) }, QV_POLL_MS)
         return () => {
           alive.current = false
-          clearInterval(timer)
         }
       }, [load])
+
+      // 有人在写字的时候刷得快：用户此刻盯着的就是那几个数字，而速度数字只在
+      // 每一趟结束时才跳一下 —— 15 秒的间隔会让「实时」变成「回放」。
+      // 全闲着就退回慢慢问：这一栏大部分时间没人看，每两秒戳一次纯属浪费。
+      useEffect(() => {
+        const timer = setInterval(
+          () => { void load(false) },
+          running ? QV_POLL_MS_ACTIVE : QV_POLL_MS,
+        )
+        return () => clearInterval(timer)
+      }, [load, running])
 
       /**
        * 当前会话排在第一行，其余保持宿主给的顺序（隔离着的 → 正在跑的 → 其余）。

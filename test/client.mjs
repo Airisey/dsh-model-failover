@@ -393,9 +393,12 @@ const documentStub = {
 }
 
 // setInterval 换成不排程的替身：真实定时器会把这个测试进程挂住。
+// 顺手把每次请求的间隔记下来 —— 会话页那一栏在有人跑着的时候要刷得更快，
+// 那是行为，值得断言，而不是实现细节。
 const realSetInterval = globalThis.setInterval
 const realClearInterval = globalThis.clearInterval
-globalThis.setInterval = () => 0
+const intervals = []
+globalThis.setInterval = (_fn, ms) => { intervals.push(ms); return 0 }
 globalThis.clearInterval = () => {}
 
 const execute = new Function('window', 'document', 'navigator', SOURCE)
@@ -747,14 +750,16 @@ await check('隔离队列：已隔离和已验证的模型后面各跟一个蓝�
     sessionRow({
       sessionId: 's-mine',
       quarantined: [
-        // 120 个 token 写了 3 秒 → 40.0 tok/s。
-        { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId: 's-mine', label: 'Code99 · Beta One', speed: { tokens: 120, ms: 3000, at } },
+        // 累计 3 秒写了 120 个 token → 40 tok/s。
+        { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId: 's-mine', label: 'Code99 · Beta One', speed: { tokens: 120, ms: 3000, runs: 2, at } },
         // 这个模型一个 token 都没吐出来，没有速度可画。
         { key: KEY('gamma', 'two'), provider: 'gamma', model: 'two', code: 'SERVER', message: '挂了', at, sessionId: 's-mine', label: 'FutureHub · Gamma Two' },
       ],
       good: [
-        // 一秒 250 个 token：三位数就不要再带小数点了。
-        { key: KEY('alpha', 'one'), provider: 'alpha', model: 'one', at, sessionId: 's-mine', label: '硅基流动 · Alpha One', speed: { tokens: 250, ms: 1000, at } },
+        // 一秒 250 个 token：两位数以上就不要小数点了。
+        { key: KEY('alpha', 'one'), provider: 'alpha', model: 'one', at, sessionId: 's-mine', label: '硅基流动 · Alpha One', speed: { tokens: 250, ms: 1000, runs: 1, at } },
+        // 个位数保留一位小数：3.4 和 3 的差别，人是有感觉的。
+        { key: KEY('delta', 'three'), provider: 'delta', model: 'three', at, sessionId: 's-mine', label: '示例 · Delta Three', speed: { tokens: 17, ms: 5000, runs: 1, at } },
       ],
     }),
   ])
@@ -766,13 +771,53 @@ await check('隔离队列：已隔离和已验证的模型后面各跟一个蓝�
   } finally {
     globalThis.fetch = saved
   }
-  assert.deepEqual(chips.map((node) => node.text), ['40.0 tok/s', '250 tok/s'], '两个有速度的模型各一个框，没有的不画空框')
+  assert.deepEqual(
+    chips.map((node) => node.text),
+    ['40 tok/s', '250 tok/s', '3.4 tok/s'],
+    '三个有速度的模型各一个框，没有的不画空框；两位数以上取整，个位数留一位小数',
+  )
   assert.ok(
     chips[0].props.title.includes('120') && chips[0].props.title.includes('3000'),
     `悬停要报原始的 token 数与毫秒数，实际是 ${chips[0].props.title}`,
   )
+  // 跑过两趟用「累计 N 趟」那条文案；只跑一趟不提趟数。（这个用例里的 t 是真字典。）
+  assert.equal(
+    chips[0].props.title,
+    '本会话累计 2 趟、共 120 个输出 token，扣掉排队和首字延迟后用了 3000 毫秒',
+    '两趟要说清是累计',
+  )
+  assert.equal(
+    chips[1].props.title,
+    '本会话累计跑出 250 个输出 token，扣掉排队和首字延迟后用了 1000 毫秒',
+    '只跑一趟不提趟数',
+  )
   assert.equal(fresh.nodes.some((node) => node.text.includes('NaN')), false, '算不出速度也不许出现 NaN')
-  assert.ok(flat.includes('40.0 tok/s'))
+  assert.ok(flat.includes('250 tok/s'))
+})
+
+await check('隔离队列：有会话正在跑时挂「运行中」标记，轮询也从 15 秒压到 2 秒', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const start = intervals.length
+  globalThis.fetch = async () => sessionsPayload([
+    // 刚开的对话：还没跑完任何一趟，所以只有实时表知道它在用谁。
+    sessionRow({ sessionId: 's-live', active: undefined, running: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' } }),
+    sessionRow({ sessionId: 's-idle' }),
+  ])
+  let flat
+  let badges
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-idle', t })))
+    badges = fresh.nodes.filter((node) => node.props?.className === 'mf-badge mf-run')
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(badges.length, 1, '只有正在跑的那个会话挂牌')
+  assert.equal(badges[0].text, '运行中')
+  assert.ok(flat.includes('硅基流动 · Alpha One'), '还没跑完的会话也要说清它在用谁')
+  const used = intervals.slice(start)
+  assert.ok(used.includes(2000), `有人在跑时该按 2 秒轮询，实际 ${used.join(', ')}`)
+  assert.ok(used.includes(15000), `闲下来要退回 15 秒，实际 ${used.join(', ')}`)
 })
 
 await check('隔离队列：当前会话那一行有标记，别的会话没有', async () => {

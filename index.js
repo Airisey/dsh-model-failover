@@ -451,8 +451,9 @@ export function apply(ctx, _config) {
   /**
    * 每个会话今天的隔离情况 + 正在用哪个模型。
    *
-   * 两种来源拼起来：隔离名单知道「哪些会话撞过墙」，便签知道「哪些会话跑过」。
-   * 只查前者会漏掉一切正常的会话，只查后者会漏掉刚隔离、还没跑完的会话。
+   * 三种来源拼起来：隔离名单知道「哪些会话撞过墙」，便签知道「哪些会话跑过」，
+   * 适配器的实时表知道「哪些会话此刻正在跑」。只用前两个会漏掉「刚开始跑、
+   * 还没跑完任何一趟」的会话 —— 而那恰恰是用户最想盯着看的那几秒。
    */
   const sessionRows = (now) => {
     const settings = settingsFile.get()
@@ -463,7 +464,7 @@ export function apply(ctx, _config) {
     const rowOf = (sessionId) => {
       let row = table.get(sessionId)
       if (row === undefined) {
-        row = { sessionId, quarantined: [], good: [], active: undefined }
+        row = { sessionId, quarantined: [], good: [], active: undefined, running: undefined }
         table.set(sessionId, row)
       }
       return row
@@ -483,12 +484,23 @@ export function apply(ctx, _config) {
         templateName: hit.template === undefined ? '' : templateName(hit.template),
       }
     }
+    // 此刻正在跑的候选：单独一份，不覆盖 `active`（那是「上一趟跑的是谁」，
+    // 两者在换人的那一瞬间会不一样，界面要能同时说清）。
+    for (const [sessionId, hit] of adapter.liveSessions()) {
+      const row = rowOf(sessionId)
+      row.running = {
+        provider: hit.provider,
+        model: hit.model,
+        at: hit.startedAt,
+        label: labelOf(hit.provider, hit.model),
+      }
+    }
     // 有事的会话排前面：隔离着的 → 正在跑的 → 其余。
     return [...table.values()].sort((left, right) => {
-      const weight = (row) => (row.quarantined.length > 0 ? 0 : row.active !== undefined ? 1 : 2)
+      const weight = (row) => (row.quarantined.length > 0 ? 0 : row.active !== undefined || row.running !== undefined ? 1 : 2)
       const delta = weight(left) - weight(right)
       if (delta !== 0) return delta
-      const at = (row) => row.quarantined.at(-1)?.at ?? row.active?.at ?? 0
+      const at = (row) => row.quarantined.at(-1)?.at ?? row.running?.at ?? row.active?.at ?? 0
       return at(right) - at(left)
     })
   }
