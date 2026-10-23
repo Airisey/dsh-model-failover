@@ -245,6 +245,14 @@ window.__ModuleLoader__.load({
         dataDir: '数据目录',
         route: '模型选择器里选',
         routeTemplates: '共 {count} 个模板',
+        appearance: '外观',
+        appearanceHint: '决定会话页「隔离队列」里显示哪些会话。',
+        optShowSubagents: '显示子智能体的会话',
+        optShowSubagentsHint:
+          '子智能体干活时也是一次正经会话（也会走接力、也会撞墙），但那是你委托出去的一次执行，不是你在侧边栏里开的那个对话，所以默认不显示。',
+        optShowForeign: '显示其他工作区的会话',
+        optShowForeignHint:
+          '别的工作区里的会话同样是你的对话。关掉之后，这一栏只剩当前工作区的会话。',
         eventsEmpty: '还没有记录。',
         evGood: '{provider}/{model} 产出内容，标记为可用',
         evQuarantine: '{provider}/{model} 无法输出（{code}），今日隔离',
@@ -374,6 +382,14 @@ window.__ModuleLoader__.load({
         dataDir: 'Data directory',
         route: 'Pick in the model chooser',
         routeTemplates: '{count} template(s)',
+        appearance: 'Appearance',
+        appearanceHint: 'Decides which conversations show up in the “Quarantine” view.',
+        optShowSubagents: 'Show subagent conversations',
+        optShowSubagentsHint:
+          'A subagent run is a real conversation too (it relays, it hits walls), but it is one delegated execution, not the chat you opened in the sidebar — so it is hidden by default.',
+        optShowForeign: 'Show conversations from other workspaces',
+        optShowForeignHint:
+          'Conversations in other workspaces are yours as well. Turn this off to keep only the current workspace.',
         eventsEmpty: 'Nothing recorded yet.',
         evGood: '{provider}/{model} produced output — marked usable',
         evQuarantine: '{provider}/{model} produced nothing ({code}) — quarantined today',
@@ -1097,7 +1113,6 @@ window.__ModuleLoader__.load({
             h(NumberInput, {
               value: settings.autoContinueFailureLimit,
               min: 1,
-              max: 20,
               name: 'failureLimit',
               disabled: busy || settings.autoContinue === false || settings.autoContinueOnFailure === false,
               onCommit: (value) => { if (value !== settings.autoContinueFailureLimit) void run('/settings', { autoContinueFailureLimit: value }) },
@@ -1118,7 +1133,6 @@ window.__ModuleLoader__.load({
             h(NumberInput, {
               value: settings.autoContinueMaxTokensLimit,
               min: 1,
-              max: 20,
               name: 'maxTokensLimit',
               disabled: busy || settings.autoContinue === false || settings.autoContinueOnMaxTokens === false,
               onCommit: (value) => { if (value !== settings.autoContinueMaxTokensLimit) void run('/settings', { autoContinueMaxTokensLimit: value }) },
@@ -1140,6 +1154,25 @@ window.__ModuleLoader__.load({
             }),
             span({ className: 'mf-note' }, t('optContinueDelayUnit')),
           ),
+        ),
+
+        // ── 外观 ────────────────────────────────────────────────────────────
+        Card({ title: t('appearance') },
+          div({ className: 'mf-note' }, t('appearanceHint')),
+          h(ToggleRow, {
+            label: t('optShowSubagents'),
+            hint: t('optShowSubagentsHint'),
+            checked: settings.showSubagentSessions === true,
+            disabled: busy,
+            onChange: (value) => void run('/settings', { showSubagentSessions: value }),
+          }),
+          h(ToggleRow, {
+            label: t('optShowForeign'),
+            hint: t('optShowForeignHint'),
+            checked: settings.showForeignSessions !== false,
+            disabled: busy,
+            onChange: (value) => void run('/settings', { showForeignSessions: value }),
+          }),
         ),
 
         // ── 事件日志 ────────────────────────────────────────────────────────
@@ -1187,8 +1220,9 @@ window.__ModuleLoader__.load({
     /**
      * 只在失焦/回车时提交的数字输入，并对上下界做夹取。
      *
-     * `name` 只落成 `data-name`，给测试和排查用：同一张卡片里现在不止一个
-     * `min=1 max=20` 的数字框，光靠上下界认不出是哪一个。
+     * `name` 只落成 `data-name`，给测试和排查用：同一张卡片里不止一个数字框，
+     * 光靠上下界认不出是哪一个。`max` 可以不给 —— 那表示这一项没有上限
+     * （比如「继续」的次数上限，想填多少填多少）。
      */
     function NumberInput({ value, min, max, name, disabled, onCommit }) {
       const [draft, setDraft] = useState(String(value))
@@ -1196,7 +1230,7 @@ window.__ModuleLoader__.load({
       const commit = () => {
         const parsed = Number.parseInt(draft, 10)
         if (!Number.isInteger(parsed)) { setDraft(String(value)); return }
-        const clamped = Math.min(max, Math.max(min, parsed))
+        const clamped = max === undefined ? Math.max(min, parsed) : Math.min(max, Math.max(min, parsed))
         setDraft(String(clamped))
         onCommit(clamped)
       }
@@ -1580,35 +1614,41 @@ window.__ModuleLoader__.load({
        * 什么都不做，要么（更糟）落到「不分会话」那一桶里替后台任务解开。
        */
       const scoped = typeof mineId === 'string' && mineId !== ''
+      /** 「外观」两个开关，宿主随 /sessions 一起给，缺省按默认值走。 */
+      const showSubagents = data?.view?.subagentSessions === true
+      const showForeign = data?.view?.foreignSessions !== false
       const rows = useMemo(() => {
         const all = Array.isArray(data?.sessions) ? data.sessions : []
         /**
-         * 只留下**侧边栏里那些会话**。
+         * 这一栏只列**你自己建的会话**：子智能体的会话默认不显示，别的工作区的
+         * 会话默认显示。两个开关都在设置页的「外观」里。
          *
-         * 子智能体跑起来也是一次真正的会话，也会走接力、也会撞墙，所以宿主照实
-         * 把它报了回来；可它是你委托出去的一次执行，不是你在左侧列表里建的那个
-         * 对话，摆在这里只会让人以为凭空多了几个会话。
-         *
-         * 判据用的是宿主自己的会话摘要：`origin === 'subagent'`。`byId` 完全拿不到
-         * （headless 组合，或者宿主还没推第一帧）时**一行都不删** —— 宁可多显示
-         * 几行，也不能因为读不到清单就把整页清空。
+         * 判据全部来自宿主自己的会话摘要（`origin`、`cwd`）。**查不到的会话一律
+         * 保留** —— 早先那版把「会话表里查无此号」当成子智能体藏掉，结果把真实
+         * 的主会话也藏了（宿主的会话表并不保证收着每一个历史会话）。宁可多显示
+         * 几行，也不能把用户的对话吞掉。
          */
-        const mine = byId === undefined
-          ? all
-          : all.filter((row) => {
-            const id = row?.sessionId
-            // 空串是「不分会话」那一桶（压缩上下文、后台任务），它不是子智能体。
-            if (typeof id !== 'string' || id === '') return true
-            const summary = byId[id]
-            // 侧边栏里根本没有这个会话 ⇒ 它就是子智能体跑出来的临时会话。
-            if (summary === undefined) return false
-            return summary.origin !== 'subagent'
-          })
-        if (!scoped) return mine
-        const index = mine.findIndex((row) => row.sessionId === mineId)
-        if (index <= 0) return mine
-        return [mine[index], ...mine.slice(0, index), ...mine.slice(index + 1)]
-      }, [byId, data, mineId, scoped])
+        const mineCwd = byId?.[mineId]?.cwd
+        const visible = all.filter((row) => {
+          const id = row?.sessionId
+          // 空串是「不分会话」那一桶（压缩上下文、后台任务），它不是子智能体。
+          if (typeof id !== 'string' || id === '') return true
+          const summary = byId?.[id]
+          if (summary === undefined) return true
+          if (summary.origin === 'subagent' && !showSubagents) return false
+          if (
+            !showForeign &&
+            typeof mineCwd === 'string' &&
+            typeof summary.cwd === 'string' &&
+            summary.cwd !== mineCwd
+          ) return false
+          return true
+        })
+        if (!scoped) return visible
+        const index = visible.findIndex((row) => row.sessionId === mineId)
+        if (index <= 0) return visible
+        return [visible[index], ...visible.slice(0, index), ...visible.slice(index + 1)]
+      }, [byId, data, mineId, scoped, showForeign, showSubagents])
 
       /** 模板 id → 名字。隔离条目上只带 id，名字得从宿主给的模板表里换。 */
       const templateName = useCallback((id) => {

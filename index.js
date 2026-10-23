@@ -65,9 +65,6 @@ const EVENTS_IN_SNAPSHOT = 80
 /** 事件日志文件的读入上限；超出部分在 normalize 阶段丢弃。 */
 const EVENT_LOG_HARD_LIMIT = 2000
 
-/** 「自动继续」连续补发次数的硬上限：再大就只是把同一堵墙撞更多次。 */
-const AUTO_CONTINUE_HARD_LIMIT = 20
-
 /** 「继续」前的等待秒数上限：再多就不如让用户自己决定什么时候重试了。 */
 const CONTINUE_DELAY_HARD_LIMIT = 300
 
@@ -186,14 +183,16 @@ export function normalizeSettings(raw) {
       ? Math.min(source.eventLogLimit, EVENT_LOG_HARD_LIMIT)
       : DEFAULT_SETTINGS.eventLogLimit
 
+  // 这两个上限**不夹顶**：上限是给用户自己拿捏的 —— 有人就是想让一个长文档
+  // 一直「继续」到写完，硬截在 20 反而把人拦住。`> 0` 之后原样收下。
   const autoContinueFailureLimit =
     Number.isInteger(source.autoContinueFailureLimit) && source.autoContinueFailureLimit > 0
-      ? Math.min(source.autoContinueFailureLimit, AUTO_CONTINUE_HARD_LIMIT)
+      ? source.autoContinueFailureLimit
       : DEFAULT_SETTINGS.autoContinueFailureLimit
 
   const autoContinueMaxTokensLimit =
     Number.isInteger(source.autoContinueMaxTokensLimit) && source.autoContinueMaxTokensLimit > 0
-      ? Math.min(source.autoContinueMaxTokensLimit, AUTO_CONTINUE_HARD_LIMIT)
+      ? source.autoContinueMaxTokensLimit
       : DEFAULT_SETTINGS.autoContinueMaxTokensLimit
 
   // 允许 0（= 不等待，回到旧行为），所以判据是 `>= 0` 而不是 `> 0`。
@@ -233,6 +232,10 @@ export function normalizeSettings(raw) {
     continueDelaySec,
     keepEventLog: source.keepEventLog !== false,
     eventLogLimit,
+    // 会话页「隔离队列」显示谁：子智能体的会话默认不显示（那是委托出去的一次
+    // 执行，不是你开的对话），别的工作区的会话默认显示（它们同样是你的对话）。
+    showSubagentSessions: source.showSubagentSessions === true,
+    showForeignSessions: source.showForeignSessions !== false,
   }
 }
 
@@ -563,6 +566,8 @@ export function apply(ctx, _config) {
     if ('continueDelaySec' in patch) next.continueDelaySec = patch.continueDelaySec
     if ('keepEventLog' in patch) next.keepEventLog = patch.keepEventLog !== false
     if ('eventLogLimit' in patch) next.eventLogLimit = patch.eventLogLimit
+    if ('showSubagentSessions' in patch) next.showSubagentSessions = patch.showSubagentSessions === true
+    if ('showForeignSessions' in patch) next.showForeignSessions = patch.showForeignSessions !== false
     // replace 会过一遍 normalizeSettings，所以非法值在这里被就地修好，
     // 而不是留给执行路径去踩。
     settingsFile.replace(next)
@@ -640,6 +645,12 @@ export function apply(ctx, _config) {
           // 会话页要显示「这个会话用的是哪个模板」，所以把 id → 名字的表一起带上
           // （这一份很小，不像 /state 那样驮着整个模型清单）。
           templates: settingsFile.get().templates.map((template) => ({ id: template.id, name: template.name })),
+          // 这一栏显示谁，由设置页的「外观」决定；判据（哪个会话是子智能体、
+          // 哪个会话属于别的工作区）只有浏览器那边拿得到，所以宿主只把开关传过去。
+          view: {
+            subagentSessions: settingsFile.get().showSubagentSessions === true,
+            foreignSessions: settingsFile.get().showForeignSessions !== false,
+          },
           sessions: sessionRows(now),
         })
         return

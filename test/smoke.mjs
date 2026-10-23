@@ -1336,6 +1336,19 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     assert.equal('catalog' in sessions.json, false, '不该带上模型清单')
     assert.equal('events' in sessions.json, false, '不该带上事件日志')
     assert.equal(typeof sessions.json.day, 'string', '要带上当前逻辑日')
+    // 外观：这一栏显示谁由设置页决定，判据在浏览器那边，所以宿主只把开关传过去。
+    assert.deepEqual(sessions.json.view, { subagentSessions: false, foreignSessions: true }, '默认不显示子智能体、显示其他工作区')
+    const viewPatch = await call('POST', '/api/dsh-model-failover/settings', {
+      showSubagentSessions: true,
+      showForeignSessions: false,
+    })
+    assert.equal(viewPatch.status, 200)
+    assert.equal(viewPatch.json.settings.showSubagentSessions, true)
+    assert.equal(viewPatch.json.settings.showForeignSessions, false)
+    const viewAfter = await call('GET', '/api/dsh-model-failover/sessions')
+    assert.deepEqual(viewAfter.json.view, { subagentSessions: true, foreignSessions: false }, '开关要能改、也要能读回来')
+    // 改回去，免得影响后面的断言。
+    await call('POST', '/api/dsh-model-failover/settings', { showSubagentSessions: false, showForeignSessions: true })
 
     // 现在还没跑过任何东西，所以是空的；跑一轮之后要能看到「正在用谁」。
     assert.equal(sessions.json.sessions.length, 0, '还没跑过时应该是空的')

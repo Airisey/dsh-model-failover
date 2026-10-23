@@ -624,7 +624,7 @@ await check('轮尾小字：3 秒 TTL 内不重复问，换一个轮号才会再
 const queue = sections[2].component
 
 /** `/sessions` 的假后端。 */
-const sessionsPayload = (sessions, day = '2026-11-27') => ({
+const sessionsPayload = (sessions, day = '2026-11-27', view = { subagentSessions: false, foreignSessions: true }) => ({
   ok: true,
   status: 200,
   text: async () => JSON.stringify({
@@ -634,6 +634,7 @@ const sessionsPayload = (sessions, day = '2026-11-27') => ({
     route: { provider: 'model-failover', label: '模型接力' },
     // 隔离条目上只带模板 id，名字得从这里换。
     templates: [{ id: 'default', name: '默认模板' }, { id: 'spare', name: '备用模板' }],
+    view,
     sessions,
   }),
 })
@@ -866,7 +867,7 @@ await check('隔离队列：会话标题取自宿主，宿主没给就退回会�
   assert.ok(flat.includes('s-untitl'), '标题缺失时退回会话号前缀')
 })
 
-await check('隔离队列：子智能体跑出来的会话不显示，只留自己建的那些', async () => {
+await check('隔离队列：子智能体的会话不显示，但会话表里查不到的会话必须留下', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
   globalThis.fetch = async () => sessionsPayload([
@@ -879,7 +880,8 @@ await check('隔离队列：子智能体跑出来的会话不显示，只留自�
       's-mine': { id: 's-mine', displayTitle: '我的会话' },
       // 子智能体：宿主自己就是这么标的。
       's-sub': { id: 's-sub', displayTitle: 'Explore 排障', origin: 'subagent', parentId: 's-mine' },
-      // `s-gone` 故意不在表里：会话已经不在侧边栏了，同样不该占一行。
+      // `s-gone` 故意不在表里 —— 宿主的会话表并不保证收着每一个历史会话，
+      // 早先那版把「查无此号」当成子智能体藏掉，结果连真实的主会话都吞了。
     },
   })
   let flat
@@ -891,11 +893,30 @@ await check('隔离队列：子智能体跑出来的会话不显示，只留自�
   } finally {
     globalThis.fetch = saved
   }
-  assert.equal(cards.length, 1, `只该剩自己那一个会话，实际 ${cards.length} 个`)
+  assert.equal(cards.length, 2, `子智能体该去掉、查不到的必须留下，实际 ${cards.length} 个`)
   assert.ok(flat.includes('我的会话'), '自己的会话还在')
   assert.equal(flat.includes('Explore 排障'), false, '子智能体的会话不该出现')
   assert.equal(flat.includes('Code99 · Beta One'), false, '它的模型也不该跟着露出来')
-  assert.equal(flat.includes('FutureHub · Gamma Two'), false, '已经不在侧边栏的会话同样不显示')
+  assert.ok(flat.includes('FutureHub · Gamma Two'), '会话表里查不到的会话照旧显示（回归：主会话不能被吞）')
+})
+
+await check('隔离队列：主会话不在宿主会话表里时也显示（回归 session-98cb9562 那类）', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const hostage = 'session-98cb9562-0d50-4e5a-8310-1880325f1c0b'
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: hostage, active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' } }),
+  ])
+  const useSessions = (select) => select({ byId: { 'another-scope': { id: 'another-scope', displayTitle: '别的会话' } } })
+  let cards
+  try {
+    await fresh.mount(queue({ sessionId: hostage, useSessions, t }))
+    cards = fresh.nodes.filter((node) => String(node.props?.className ?? '').startsWith('mf-qv-session'))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(cards.length, 1, '主会话必须显示出来')
+  assert.equal(cards[0].props.className, 'mf-qv-session mf-mine', '而且它就是当前会话')
 })
 
 await check('隔离队列：拿不到宿主会话表时一行都不删（宁可多显示）', async () => {
@@ -1170,7 +1191,7 @@ globalThis.fetch = async (url, init = {}) => {
         }))
       }
       if (typeof body.editedTemplate === 'string') current.settings.editedTemplate = body.editedTemplate
-      for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec', 'showSubagentSessions', 'showForeignSessions']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -1502,7 +1523,7 @@ await check('关掉「输出撞上限」这一项，POST 的是它自己的键',
   await runtime.mount(page(props))
 })
 
-await check('失败上限失焦后 POST autoContinueFailureLimit，超范围夹到 1-20', async () => {
+await check('失败上限失焦后 POST autoContinueFailureLimit，没有上界、只夹下界 1', async () => {
   const before = requests.length
   failureLimitInput().props.onChange({ target: { value: '99' } })
   await runtime.mount(page(props))
@@ -1512,11 +1533,18 @@ await check('失败上限失焦后 POST autoContinueFailureLimit，超范围夹�
 
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
-  assert.deepEqual(posts[0].body, { autoContinueFailureLimit: 20 }, '夹到硬上限 20')
-  assert.equal(current.settings.autoContinueFailureLimit, 20)
+  assert.deepEqual(posts[0].body, { autoContinueFailureLimit: 99 }, '不再有 20 条的上界')
+  assert.equal(current.settings.autoContinueFailureLimit, 99)
   assert.equal(current.settings.autoContinueMaxTokensLimit, 10, '两个计数各算各的，不能串')
 
-  // 恢复，免得影响后面的用例。
+  assert.equal(failureLimitInput().props.max, undefined, '输入框自己也不该再带 max')
+
+  // 下界还是要夹的，顺便恢复现场。
+  failureLimitInput().props.onChange({ target: { value: '0' } })
+  await runtime.mount(page(props))
+  failureLimitInput().props.onBlur()
+  await runtime.mount(page(props))
+  assert.equal(current.settings.autoContinueFailureLimit, 1, '0 要夹到 1')
   failureLimitInput().props.onChange({ target: { value: '1' } })
   await runtime.mount(page(props))
   failureLimitInput().props.onBlur()
@@ -1533,8 +1561,8 @@ await check('撞上限次数失焦后 POST autoContinueMaxTokensLimit，且不�
 
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1)
-  assert.deepEqual(posts[0].body, { autoContinueMaxTokensLimit: 20 }, '夹到硬上限 20')
-  assert.equal(current.settings.autoContinueMaxTokensLimit, 20)
+  assert.deepEqual(posts[0].body, { autoContinueMaxTokensLimit: 42 }, '不再有 20 条的上界')
+  assert.equal(current.settings.autoContinueMaxTokensLimit, 42)
   assert.equal(current.settings.autoContinueFailureLimit, 1, '两个计数各算各的，不能串')
 
   // 恢复，免得影响后面的用例。
@@ -1542,6 +1570,82 @@ await check('撞上限次数失焦后 POST autoContinueMaxTokensLimit，且不�
   await runtime.mount(page(props))
   maxTokensLimitInput().props.onBlur()
   await runtime.mount(page(props))
+})
+
+await check('外观：两个开关反映宿主设置，点一下就 POST 对应的键', async () => {
+  const before = requests.length
+  const switchFor = (key) => runtime.nodes.find((node) => node.tag === 'button' && node.props?.['aria-label'] === key)
+  assert.ok(switchFor('optShowSubagents') !== undefined, '子智能体开关要在设置页上')
+  assert.ok(switchFor('optShowForeign') !== undefined, '其他工作区开关要在设置页上')
+  assert.equal(switchFor('optShowSubagents').props['aria-pressed'], 'false', '默认不显示子智能体')
+  assert.equal(switchFor('optShowForeign').props['aria-pressed'], 'true', '默认显示其他工作区')
+
+  switchFor('optShowSubagents').props.onClick()
+  await runtime.mount(page(props))
+  switchFor('optShowForeign').props.onClick()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.deepEqual(posts.map((row) => row.body), [
+    { showSubagentSessions: true },
+    { showForeignSessions: false },
+  ])
+  assert.equal(current.settings.showSubagentSessions, true)
+  assert.equal(current.settings.showForeignSessions, false)
+
+  // 恢复，免得影响后面的用例。
+  switchFor('optShowSubagents').props.onClick()
+  await runtime.mount(page(props))
+  switchFor('optShowForeign').props.onClick()
+  await runtime.mount(page(props))
+  assert.equal(current.settings.showSubagentSessions, false)
+  assert.equal(current.settings.showForeignSessions, true)
+})
+
+await check('隔离队列：关掉「其他工作区」之后只剩当前工作区的会话', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine', active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' } }),
+    sessionRow({ sessionId: 's-elsewhere', active: { provider: 'beta', model: 'one', at, label: 'Code99 · Beta One' } }),
+  ], '2026-11-27', { subagentSessions: false, foreignSessions: false })
+  const useSessions = (select) => select({
+    byId: {
+      's-mine': { id: 's-mine', displayTitle: '这个工作区的对话', cwd: 'C:\\work\\a' },
+      's-elsewhere': { id: 's-elsewhere', displayTitle: '别的工作区的对话', cwd: 'C:\\work\\b' },
+    },
+  })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', useSessions, t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('这个工作区的对话'), '当前工作区的留下')
+  assert.equal(flat.includes('别的工作区的对话'), false, '别的工作区的被筛掉')
+})
+
+await check('隔离队列：开着「其他工作区」时两边的会话都在', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine', active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One' } }),
+    sessionRow({ sessionId: 's-elsewhere', active: { provider: 'beta', model: 'one', at, label: 'Code99 · Beta One' } }),
+  ], '2026-11-27', { subagentSessions: false, foreignSessions: true })
+  const useSessions = (select) => select({
+    byId: {
+      's-mine': { id: 's-mine', displayTitle: '这个工作区的对话', cwd: 'C:\\work\\a' },
+      's-elsewhere': { id: 's-elsewhere', displayTitle: '别的工作区的对话', cwd: 'C:\\work\\b' },
+    },
+  })
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', useSessions, t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('这个工作区的对话'))
+  assert.ok(flat.includes('别的工作区的对话'))
 })
 
 await check('等待秒数失焦后 POST continueDelaySec，超范围夹到 0-300', async () => {

@@ -737,18 +737,19 @@ await check('关掉用 false 表达；"false" 这种字符串也算关（与既�
   assert.equal(normalizeSettings({ autoContinueOnMaxTokens: false }).autoContinueOnMaxTokens, false)
 })
 
-await check('两个上限都必须是正整数，各自夹在 1..20，互不影响', () => {
+await check('两个上限都必须是正整数，没有上界，互不影响', () => {
   assert.equal(normalizeSettings({ autoContinueFailureLimit: 7 }).autoContinueFailureLimit, 7)
   assert.equal(normalizeSettings({ autoContinueFailureLimit: 7 }).autoContinueMaxTokensLimit, 10, '改一个不动另一个')
   assert.equal(normalizeSettings({ autoContinueFailureLimit: 0 }).autoContinueFailureLimit, 1, '0 非法 → 回默认')
   assert.equal(normalizeSettings({ autoContinueFailureLimit: -2 }).autoContinueFailureLimit, 1)
   assert.equal(normalizeSettings({ autoContinueFailureLimit: 2.5 }).autoContinueFailureLimit, 1)
-  assert.equal(normalizeSettings({ autoContinueFailureLimit: 999 }).autoContinueFailureLimit, 20, '夹到硬上限')
+  // 设置页不再有「最多 20 条」这道闸，宿主这边也不再夹。
+  assert.equal(normalizeSettings({ autoContinueFailureLimit: 999 }).autoContinueFailureLimit, 999, '想填多少填多少')
   assert.equal(normalizeSettings({ autoContinueFailureLimit: '4' }).autoContinueFailureLimit, 1, '字符串不认')
 
   assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 15 }).autoContinueMaxTokensLimit, 15)
   assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 0 }).autoContinueMaxTokensLimit, 10)
-  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 999 }).autoContinueMaxTokensLimit, 20)
+  assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: 999 }).autoContinueMaxTokensLimit, 999)
   assert.equal(normalizeSettings({ autoContinueMaxTokensLimit: '4' }).autoContinueMaxTokensLimit, 10)
 })
 
