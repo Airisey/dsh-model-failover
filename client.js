@@ -255,7 +255,7 @@ window.__ModuleLoader__.load({
         tailModel: '本轮：{label}',
         viewQuarantine: '隔离队列',
         qvHint:
-          '隔离是「按会话 × 模板」算的：某个模型在哪个会话的哪条模板上撞了墙，就只在那条队列里被跳过，别的会话、别的模板照常用它。下面按会话列出正在使用的模型和已经被隔离的模型，每个会话右边那个按钮只解除它自己的隔离。',
+          '隔离是「按会话 × 模板」算的：某个模型在哪个会话的哪条模板上撞了墙，就只在那条队列里被跳过，别的会话、别的模板照常用它。下面只列你自己建的会话（子智能体跑出来的会话不在这里），每个会话右边那个按钮只解除它自己的隔离。',
         qvRefresh: '刷新',
         qvClear: '解除隔离',
         qvClearHint: '只解除这个会话的隔离，别的会话一条都不动。',
@@ -1582,11 +1582,33 @@ window.__ModuleLoader__.load({
       const scoped = typeof mineId === 'string' && mineId !== ''
       const rows = useMemo(() => {
         const all = Array.isArray(data?.sessions) ? data.sessions : []
-        if (!scoped) return all
-        const index = all.findIndex((row) => row.sessionId === mineId)
-        if (index <= 0) return all
-        return [all[index], ...all.slice(0, index), ...all.slice(index + 1)]
-      }, [data, mineId, scoped])
+        /**
+         * 只留下**侧边栏里那些会话**。
+         *
+         * 子智能体跑起来也是一次真正的会话，也会走接力、也会撞墙，所以宿主照实
+         * 把它报了回来；可它是你委托出去的一次执行，不是你在左侧列表里建的那个
+         * 对话，摆在这里只会让人以为凭空多了几个会话。
+         *
+         * 判据用的是宿主自己的会话摘要：`origin === 'subagent'`。`byId` 完全拿不到
+         * （headless 组合，或者宿主还没推第一帧）时**一行都不删** —— 宁可多显示
+         * 几行，也不能因为读不到清单就把整页清空。
+         */
+        const mine = byId === undefined
+          ? all
+          : all.filter((row) => {
+            const id = row?.sessionId
+            // 空串是「不分会话」那一桶（压缩上下文、后台任务），它不是子智能体。
+            if (typeof id !== 'string' || id === '') return true
+            const summary = byId[id]
+            // 侧边栏里根本没有这个会话 ⇒ 它就是子智能体跑出来的临时会话。
+            if (summary === undefined) return false
+            return summary.origin !== 'subagent'
+          })
+        if (!scoped) return mine
+        const index = mine.findIndex((row) => row.sessionId === mineId)
+        if (index <= 0) return mine
+        return [mine[index], ...mine.slice(0, index), ...mine.slice(index + 1)]
+      }, [byId, data, mineId, scoped])
 
       /** 模板 id → 名字。隔离条目上只带 id，名字得从宿主给的模板表里换。 */
       const templateName = useCallback((id) => {

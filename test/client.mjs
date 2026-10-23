@@ -847,7 +847,12 @@ await check('隔离队列：会话标题取自宿主，宿主没给就退回会�
     sessionRow({ sessionId: 's-untitled', active: undefined }),
   ])
   // 宿主注入的 hook：按 selector 读会话表。
-  const useSessions = (select) => select({ byId: { 's-titled': { id: 's-titled', displayTitle: '排障会话' } } })
+  const useSessions = (select) => select({
+    byId: {
+      's-titled': { id: 's-titled', displayTitle: '排障会话' },
+      's-untitled': { id: 's-untitled' },
+    },
+  })
   let flat
   try {
     flat = fresh.text(await fresh.mount(queue({ sessionId: 's-titled', useSessions, t })))
@@ -859,6 +864,56 @@ await check('隔离队列：会话标题取自宿主，宿主没给就退回会�
   assert.ok(flat.includes('s-titled'.slice(0, 8)), '会话号前缀作为副标题保留')
   assert.ok(flat.includes('未命名会话'), '没跑过东西的会话也要有标题兜底')
   assert.ok(flat.includes('s-untitl'), '标题缺失时退回会话号前缀')
+})
+
+await check('隔离队列：子智能体跑出来的会话不显示，只留自己建的那些', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-mine' }),
+    sessionRow({ sessionId: 's-sub', active: { provider: 'beta', model: 'one', at, label: 'Code99 · Beta One' } }),
+    sessionRow({ sessionId: 's-gone', active: { provider: 'gamma', model: 'two', at, label: 'FutureHub · Gamma Two' } }),
+  ])
+  const useSessions = (select) => select({
+    byId: {
+      's-mine': { id: 's-mine', displayTitle: '我的会话' },
+      // 子智能体：宿主自己就是这么标的。
+      's-sub': { id: 's-sub', displayTitle: 'Explore 排障', origin: 'subagent', parentId: 's-mine' },
+      // `s-gone` 故意不在表里：会话已经不在侧边栏了，同样不该占一行。
+    },
+  })
+  let flat
+  let cards
+  try {
+    const tree = await fresh.mount(queue({ sessionId: 's-mine', useSessions, t }))
+    flat = fresh.text(tree)
+    cards = fresh.nodes.filter((node) => String(node.props?.className ?? '').startsWith('mf-qv-session'))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(cards.length, 1, `只该剩自己那一个会话，实际 ${cards.length} 个`)
+  assert.ok(flat.includes('我的会话'), '自己的会话还在')
+  assert.equal(flat.includes('Explore 排障'), false, '子智能体的会话不该出现')
+  assert.equal(flat.includes('Code99 · Beta One'), false, '它的模型也不该跟着露出来')
+  assert.equal(flat.includes('FutureHub · Gamma Two'), false, '已经不在侧边栏的会话同样不显示')
+})
+
+await check('隔离队列：拿不到宿主会话表时一行都不删（宁可多显示）', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-a' }),
+    sessionRow({ sessionId: 's-b' }),
+  ])
+  let cards
+  try {
+    // 宿主没注入 useSessions（headless 组合），此时无从判断谁是谁，只能照单全收。
+    await fresh.mount(queue({ sessionId: 's-x', t }))
+    cards = fresh.nodes.filter((node) => String(node.props?.className ?? '').startsWith('mf-qv-session'))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(cards.length, 2, '查不到来源就不能把会话吞掉')
 })
 
 await check('隔离队列：一个会话都没有时给出空态，首帧给加载态', async () => {
