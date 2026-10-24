@@ -266,11 +266,10 @@ window.__ModuleLoader__.load({
         tailModel: '本轮：{label}',
         viewQuarantine: '隔离队列',
         qvHint:
-          '隔离是「按会话 × 模板」算的：某个模型在哪个会话的哪条模板上撞了墙，就只在那条队列里被跳过，别的会话、别的模板照常用它。下面只列你自己建的会话（子智能体跑出来的会话不在这里），每个会话右边那个按钮只解除它自己的隔离。',
+          '隔离是「按会话 × 模板」算的：某个模型在哪个会话的哪条模板上撞了墙，就只在那条队列里被跳过，别的会话、别的模板照常用它。下面只列你自己建的会话（子智能体跑出来的会话不在这里），每个会话右边那个按钮只解除它自己的隔离。鼠标移到红胶囊上是完整报错，右键把它整块复制走。',
         qvRefresh: '刷新',
         qvClear: '解除隔离',
         qvClearHint: '只解除这个会话的隔离，别的会话一条都不动。',
-        qvCopyHint: '右键复制这条报错（含模型、错误码和完整原文）',
         qvCopied: '已复制',
         qvCopyFailed: '复制失败：浏览器没让我们写剪贴板，手动选中复制吧',
         qvLoading: '读取中…',
@@ -406,11 +405,10 @@ window.__ModuleLoader__.load({
         tailModel: 'Turn: {label}',
         viewQuarantine: 'Quarantine',
         qvHint:
-          'Quarantine is per conversation and per template: a model that failed on one queue inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined; the button on each row only clears that conversation.',
+          'Quarantine is per conversation and per template: a model that failed on one queue inside one conversation is skipped only there, and stays available everywhere else. The list below shows, per conversation, the model in use and the models quarantined; the button on each row only clears that conversation. Hover a red chip for the full error, right-click it to copy the whole thing.',
         qvRefresh: 'Refresh',
         qvClear: 'Clear',
         qvClearHint: 'Only clears the quarantine of this conversation; other conversations are untouched.',
-        qvCopyHint: 'Right-click to copy this error (model, code and the full message)',
         qvCopied: 'Copied',
         qvCopyFailed: 'Copy failed: the browser would not let us write to the clipboard — select the text instead',
         qvLoading: 'Loading…',
@@ -1585,7 +1583,7 @@ window.__ModuleLoader__.load({
                     key: chipKey,
                     // 悬停给全文（正文动辄几百字符，铺在行里会把面板撑烂）；
                     // 右键把「谁 + 哪条模板 + 什么码 + 报错原文」整块拿走。
-                    title: `${String(item.message ?? '')}\n${t('qvCopyHint')}`,
+                    title: String(item.message ?? ''),
                     onContextMenu: (event) => {
                       event?.preventDefault?.()
                       onCopyError?.(item, chipKey)

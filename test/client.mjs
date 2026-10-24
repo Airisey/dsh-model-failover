@@ -710,9 +710,9 @@ await check('隔离队列：问的是轻量 /sessions，按会话列出「正在
   // 报错原文挂在 title 上（悬停才看得见），不在纯文本里 —— 从节点上断言。
   const titled = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-qv-item mf-bad'))
   assert.equal(titled.length, 1, '隔离项渲染成一个红色胶囊')
-  // title = 报错原文 + 换行 + 「右键能复制」的说明。先给原文，别让提示把它顶掉。
-  assert.equal(titled[0].props.title.split('\n')[0], '余额不足', '悬停先给报错原文')
-  assert.ok(titled[0].props.title.includes('右键复制'), '顺便告诉用户这里能右键复制')
+  // title **只**放报错原文：那是用户移上去想看的东西，别拿说明文字去挤它。
+  assert.equal(titled[0].props.title, '余额不足', '悬停弹窗就是报错原文，一个字都不多')
+  assert.ok(flat.includes('右键把它整块复制走'), '怎么右键复制写在上面的说明行里')
   // 第二个会话：没有隔离，只显示一句「没有出过问题」。
   assert.ok(flat.includes('FutureHub · Gamma Two'), '第二个会话有它自己的当前模型')
   assert.ok(flat.includes('今天没有出过问题的模型'), '没有隔离时说清楚')
