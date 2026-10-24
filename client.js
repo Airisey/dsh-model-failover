@@ -132,6 +132,9 @@ window.__ModuleLoader__.load({
 .mf-qv-item.mf-bad { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
 .mf-qv-item.mf-ok { border-color: color-mix(in srgb, #30a46c 55%, transparent); color: #30a46c; }
 .mf-qv-item > .mf-qv-code { opacity: .65; }
+/* 右键就能整块复制，鼠标形状得先说明这件事。 */
+.mf-qv-item.mf-copyable { cursor: context-menu; }
+.mf-copied { margin-left: 4px; color: #30a46c; }
 /* 输出速度：蓝框蓝字，紧跟在模型名后面。跟红/绿胶囊并排，一眼分清「今天行不行」
    和「用起来多快」是两个问题。 */
 .mf-speed { flex: none; border: 1px solid #4c9aff; color: #4c9aff; border-radius: 5px; padding: 0 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -267,6 +270,9 @@ window.__ModuleLoader__.load({
         qvRefresh: '刷新',
         qvClear: '解除隔离',
         qvClearHint: '只解除这个会话的隔离，别的会话一条都不动。',
+        qvCopyHint: '右键复制这条报错（含模型、错误码和完整原文）',
+        qvCopied: '已复制',
+        qvCopyFailed: '复制失败：浏览器没让我们写剪贴板，手动选中复制吧',
         qvLoading: '读取中…',
         qvFailed: '读取失败：{message}',
         qvEmpty: '还没有任何会话跑过。',
@@ -404,6 +410,9 @@ window.__ModuleLoader__.load({
         qvRefresh: 'Refresh',
         qvClear: 'Clear',
         qvClearHint: 'Only clears the quarantine of this conversation; other conversations are untouched.',
+        qvCopyHint: 'Right-click to copy this error (model, code and the full message)',
+        qvCopied: 'Copied',
+        qvCopyFailed: 'Copy failed: the browser would not let us write to the clipboard — select the text instead',
         qvLoading: 'Loading…',
         qvFailed: 'Could not load: {message}',
         qvEmpty: 'No conversation has run anything yet.',
@@ -477,6 +486,61 @@ window.__ModuleLoader__.load({
     function stamp(ts) {
       const at = new Date(ts)
       return `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${clock(ts)}`
+    }
+
+    /**
+     * 把一段文字塞进系统剪贴板，返回是否成功。
+     *
+     * 先走 `navigator.clipboard`（本程序跑在 127.0.0.1 上，属于安全上下文，
+     * 这条路径正常可用）；拿不到或被权限挡住时退回隐藏 textarea + `execCommand`。
+     * 两条都失败就返回 false，让调用方**不要**谎报「已复制」。
+     */
+    async function copyText(text) {
+      try {
+        if (typeof navigator?.clipboard?.writeText === 'function') {
+          await navigator.clipboard.writeText(text)
+          return true
+        }
+      } catch {
+        // 权限被拒 / 非安全上下文，落到下面那条老路。
+      }
+      try {
+        const area = document.createElement('textarea')
+        area.value = text
+        area.setAttribute('readonly', '')
+        area.style.position = 'fixed'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        const ok = document.execCommand('copy') === true
+        area.remove()
+        return ok
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * 一条隔离记录拼成可以直接粘出去的文本：抬头一行写清「谁、哪条模板、什么码、
+     * 什么时候」，换行后跟宿主留下的报错原文。
+     *
+     * 为什么要抬头：报错正文常常只有一句 `Error in upstream response`，
+     * 单看它既认不出是哪个模型，也认不出是哪条队列上的账 —— 贴到别处等于白贴。
+     */
+    function errorBlock(item, templateName) {
+      const code = String(item?.code ?? '?')
+      // 没有模板号的记录（不分会话那一桶）不补模板名：宁缺一句，也不写个「?」。
+      const template = typeof item?.templateId === 'string' && item.templateId !== ''
+        ? templateName(item.templateId)
+        : undefined
+      const head = [
+        sessionItemLabel(item),
+        template,
+        `${codeText(code) || code} (${code})`,
+        stamp(item?.at),
+      ].filter((part) => typeof part === 'string' && part !== '').join(' · ')
+      const message = String(item?.message ?? '').trim()
+      return message === '' ? head : `${head}\n${message}`
     }
 
     /** 「3 小时 12 分」这种人类可读的剩余时间。 */
@@ -1459,7 +1523,7 @@ window.__ModuleLoader__.load({
      * 拿不到时退回会话号前缀 —— 这一栏是给人看「哪个会话出事了」，标题只是
      * 帮助识别，缺了也不能空白。
      */
-    function SessionQueueRow({ row, mine, title, t, templateName, onClear, busy }) {
+    function SessionQueueRow({ row, mine, title, t, templateName, onClear, busy, onCopyError, copiedKey }) {
       const quarantined = row?.quarantined ?? []
       const good = row?.good ?? []
       const active = row?.active
@@ -1513,20 +1577,31 @@ window.__ModuleLoader__.load({
           quarantined.length === 0
             ? span({ className: 'mf-qv-value' }, t('qvNoProblem'))
             : div({ className: 'mf-qv-list' },
-                ...quarantined.map((item) => h('span', {
-                  className: 'mf-qv-item mf-bad',
-                  key: `${item.key ?? ''}\u0000${item.templateId ?? ''}`,
-                  title: String(item.message ?? ''),
-                },
-                  span(null, sessionItemLabel(item)),
-                  // 别的模板撞的墙不算这个会话当前的麻烦，但也不能凭空消失：
-                  // 补一句模板名，说明它是哪条队列上的账。
-                  item.templateId === undefined || item.templateId === active?.templateId
-                    ? null
-                    : span({ className: 'mf-qv-code' }, ` · ${templateName(item.templateId)}`),
-                  span({ className: 'mf-qv-code' }, ` · ${codeText(item.code) || String(item.code ?? '?')} · ${stamp(item.at)}`),
-                  speedChip(item),
-                )),
+                ...quarantined.map((item) => {
+                  const chipKey = `${item.key ?? ''}\u0000${item.templateId ?? ''}`
+                  const copied = copiedKey !== undefined && copiedKey === chipKey
+                  return h('span', {
+                    className: 'mf-qv-item mf-bad mf-copyable',
+                    key: chipKey,
+                    // 悬停给全文（正文动辄几百字符，铺在行里会把面板撑烂）；
+                    // 右键把「谁 + 哪条模板 + 什么码 + 报错原文」整块拿走。
+                    title: `${String(item.message ?? '')}\n${t('qvCopyHint')}`,
+                    onContextMenu: (event) => {
+                      event?.preventDefault?.()
+                      onCopyError?.(item, chipKey)
+                    },
+                  },
+                    span(null, sessionItemLabel(item)),
+                    // 别的模板撞的墙不算这个会话当前的麻烦，但也不能凭空消失：
+                    // 补一句模板名，说明它是哪条队列上的账。
+                    item.templateId === undefined || item.templateId === active?.templateId
+                      ? null
+                      : span({ className: 'mf-qv-code' }, ` · ${templateName(item.templateId)}`),
+                    span({ className: 'mf-qv-code' }, ` · ${codeText(item.code) || String(item.code ?? '?')} · ${stamp(item.at)}`),
+                    speedChip(item),
+                    copied ? span({ className: 'mf-copied' }, t('qvCopied')) : null,
+                  )
+                }),
               ),
         ),
         good.length === 0
@@ -1561,6 +1636,9 @@ window.__ModuleLoader__.load({
       const [data, setData] = useState(null)
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
+      /** 刚复制过的那条隔离记录的 key —— 只为了在那颗胶囊上闪一下「已复制」。 */
+      const [copied, setCopied] = useState('')
+      const copiedTimer = useRef(0)
       const alive = useRef(true)
       // 宿主没注入这个 hook 也照常工作，只是标题退化成会话号。
       const useSessions = typeof props.useSessions === 'function' ? props.useSessions : () => undefined
@@ -1590,6 +1668,7 @@ window.__ModuleLoader__.load({
         void load(true)
         return () => {
           alive.current = false
+          clearTimeout(copiedTimer.current)
         }
       }, [load])
 
@@ -1690,6 +1769,27 @@ window.__ModuleLoader__.load({
         }
       }, [busy, load, scoped])
 
+      /**
+       * 右键一条隔离记录：把它的报错整块塞进剪贴板。
+       *
+       * 复制失败时**写进 error 那一行**，不假装成功 —— 这颗胶囊闪一下「已复制」
+       * 却没真进剪贴板，比什么都不做更糟。
+       */
+      const copyError = useCallback(async (item, chipKey) => {
+        const ok = await copyText(errorBlock(item, templateName))
+        if (!alive.current) return
+        if (!ok) {
+          setError(t('qvCopyFailed'))
+          return
+        }
+        setError('')
+        setCopied(chipKey)
+        clearTimeout(copiedTimer.current)
+        copiedTimer.current = setTimeout(() => {
+          if (alive.current) setCopied('')
+        }, 1600)
+      }, [t, templateName])
+
       return div({ className: 'mf-qv' },
         div({ className: 'mf-qv-head' },
           div({ className: 'mf-title' }, t('viewQuarantine')),
@@ -1716,6 +1816,8 @@ window.__ModuleLoader__.load({
                 templateName,
                 busy,
                 onClear: (sessionId) => void clearOne(sessionId),
+                onCopyError: (item, chipKey) => void copyError(item, chipKey),
+                copiedKey: copied,
               })),
       )
     }

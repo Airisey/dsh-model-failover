@@ -277,6 +277,13 @@ const REACT = {
 const KEY = (provider, model) => `${provider}\u0000${model}`
 const at = Date.now()
 
+/** 和 client.js 的 `stamp()` 同口径的 `MM-DD HH:MM`，用来算期望的复制文本。 */
+const pad2 = (value) => String(value).padStart(2, '0')
+const stampOf = (ts) => {
+  const when = new Date(ts)
+  return `${pad2(when.getMonth() + 1)}-${pad2(when.getDate())} ${pad2(when.getHours())}:${pad2(when.getMinutes())}`
+}
+
 /**
  * 一条长报错：前半段是线上真实出现过的那种 DNS 隧道失败，末尾那个标记故意放在
  * 160 字符之后 —— 摘要行截断到 160，展开时才该看到它。
@@ -401,11 +408,18 @@ const intervals = []
 globalThis.setInterval = (_fn, ms) => { intervals.push(ms); return 0 }
 globalThis.clearInterval = () => {}
 
+// 剪贴板：把每次写入记下来，供「右键复制报错」那两条用例断言。
+const clipboardWrites = []
+const navigatorStub = {
+  language: 'zh-CN',
+  clipboard: { writeText: async (text) => { clipboardWrites.push(text) } },
+}
+
 const execute = new Function('window', 'document', 'navigator', SOURCE)
 execute(
   { __ModuleLoader__: { load: (entry) => loaded.push(entry) } },
   documentStub,
-  { language: 'zh-CN' },
+  navigatorStub,
 )
 
 const bundle = loaded[0]
@@ -696,7 +710,9 @@ await check('隔离队列：问的是轻量 /sessions，按会话列出「正在
   // 报错原文挂在 title 上（悬停才看得见），不在纯文本里 —— 从节点上断言。
   const titled = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-qv-item mf-bad'))
   assert.equal(titled.length, 1, '隔离项渲染成一个红色胶囊')
-  assert.equal(titled[0].props.title, '余额不足')
+  // title = 报错原文 + 换行 + 「右键能复制」的说明。先给原文，别让提示把它顶掉。
+  assert.equal(titled[0].props.title.split('\n')[0], '余额不足', '悬停先给报错原文')
+  assert.ok(titled[0].props.title.includes('右键复制'), '顺便告诉用户这里能右键复制')
   // 第二个会话：没有隔离，只显示一句「没有出过问题」。
   assert.ok(flat.includes('FutureHub · Gamma Two'), '第二个会话有它自己的当前模型')
   assert.ok(flat.includes('今天没有出过问题的模型'), '没有隔离时说清楚')
@@ -741,6 +757,73 @@ await check('隔离队列：每个会话那行写明它在用哪个模板', asyn
   }
   assert.ok(flat.includes('备用模板'), '当前会话用的是备用模板，要写出来')
   assert.ok(flat.includes('默认模板'), '另一个会话仍写它的模板名')
+})
+
+await check('隔离队列：右键一条已隔离的模型，把它的报错整块复制走', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({
+      sessionId: 's-mine',
+      quarantined: [
+        { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId: 's-mine', templateId: 'default', label: 'Code99 · Beta One' },
+      ],
+    }),
+  ])
+  let chip
+  let preventDefaulted = false
+  let flat
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    chip = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-qv-item mf-bad'))[0]
+    clipboardWrites.length = 0
+    assert.equal(typeof chip.props.onContextMenu, 'function', '胶囊上要挂右键处理')
+    chip.props.onContextMenu({ preventDefault: () => { preventDefaulted = true } })
+    // copyText 是 async 的，等它落地再断言。
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // 重挂一次把 setState 的效果刷出来（这个替身只在 mount 时收敛）。
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.equal(preventDefaulted, true, '要拦掉浏览器自带的右键菜单，否则复制还没发生菜单就弹出来了')
+  assert.equal(clipboardWrites.length, 1, '一次右键只写一次剪贴板')
+  const copied = clipboardWrites[0]
+  assert.equal(
+    copied.split('\n')[0],
+    'Code99 · Beta One · 默认模板 · 额度/余额耗尽 (QUOTA) · ' + stampOf(at),
+    '抬头一行写清谁、哪条模板、什么码、什么时候',
+  )
+  assert.equal(copied.split('\n')[1], '余额不足', '换行后跟宿主留下的报错原文')
+  assert.ok(flat.includes('已复制'), '复制成功后要在那颗胶囊上闪一下')
+})
+
+await check('隔离队列：右键复制失败时如实报错，不假装复制成功', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const savedClipboard = navigatorStub.clipboard
+  navigatorStub.clipboard = { writeText: async () => { throw new Error('NotAllowedError') } }
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({
+      sessionId: 's-mine',
+      quarantined: [
+        { key: KEY('beta', 'one'), provider: 'beta', model: 'one', code: 'QUOTA', message: '余额不足', at, sessionId: 's-mine', label: 'Code99 · Beta One' },
+      ],
+    }),
+  ])
+  let flat
+  try {
+    await fresh.mount(queue({ sessionId: 's-mine', t }))
+    const chip = fresh.nodes.filter((node) => String(node.props?.className ?? '').includes('mf-qv-item mf-bad'))[0]
+    chip.props.onContextMenu({ preventDefault: () => {} })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-mine', t })))
+  } finally {
+    globalThis.fetch = saved
+    navigatorStub.clipboard = savedClipboard
+  }
+  assert.ok(!flat.includes('已复制'), '没写进剪贴板就不能说「已复制」')
+  assert.ok(flat.includes('复制失败'), '要告诉用户复制没成')
 })
 
 await check('隔离队列：已隔离和已验证的模型后面各跟一个蓝框写输出速度', async () => {
