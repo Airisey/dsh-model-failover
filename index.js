@@ -30,6 +30,7 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_TEMPLATE_ID,
   DEFAULT_TEMPLATE_NAME,
+  MAX_IDLE_TIMEOUT_SEC,
   MAX_TEMPLATES,
   MAX_SAME_MODEL_RETRIES,
   MAX_TEMPLATE_CANDIDATES,
@@ -70,6 +71,9 @@ const CONTINUE_DELAY_HARD_LIMIT = 300
 
 /** 同一个模型额外重试几次的上限，和 lib/constants.js 的 MAX_SAME_MODEL_RETRIES 一致。 */
 const SAME_MODEL_RETRIES_HARD_LIMIT = MAX_SAME_MODEL_RETRIES
+
+/** 「多久没输出算卡住」的上限，和 lib/constants.js 的 MAX_IDLE_TIMEOUT_SEC 一致。 */
+const IDLE_TIMEOUT_HARD_LIMIT = MAX_IDLE_TIMEOUT_SEC
 
 /**
  * 试连接时的输出上限。
@@ -210,6 +214,13 @@ export function normalizeSettings(raw) {
       ? Math.min(source.sameModelRetries, SAME_MODEL_RETRIES_HARD_LIMIT)
       : DEFAULT_SETTINGS.sameModelRetries
 
+  // 同样允许 0（= 不管它卡多久）。判据用 `>= 0`，理由和 continueDelaySec 一样：
+  // 0 是一个有意义的取值，不能悄悄回落到默认的 120 秒。
+  const idleTimeoutSec =
+    Number.isInteger(source.idleTimeoutSec) && source.idleTimeoutSec >= 0
+      ? Math.min(source.idleTimeoutSec, IDLE_TIMEOUT_HARD_LIMIT)
+      : DEFAULT_SETTINGS.idleTimeoutSec
+
   return {
     enabled: source.enabled !== false,
     bootstrapped: source.bootstrapped === true,
@@ -230,6 +241,7 @@ export function normalizeSettings(raw) {
     autoContinueFailureLimit,
     autoContinueMaxTokensLimit,
     continueDelaySec,
+    idleTimeoutSec,
     keepEventLog: source.keepEventLog !== false,
     eventLogLimit,
     // 会话页「隔离队列」显示谁：子智能体的会话默认不显示（那是委托出去的一次
@@ -496,6 +508,8 @@ export function apply(ctx, _config) {
         model: hit.model,
         at: hit.startedAt,
         label: labelOf(hit.provider, hit.model),
+        templateId: hit.templateId,
+        templateName: hit.templateId === undefined ? '' : templateName(hit.templateId),
       }
     }
     // 有事的会话排前面：隔离着的 → 正在跑的 → 其余。
@@ -564,6 +578,7 @@ export function apply(ctx, _config) {
     if ('autoContinueFailureLimit' in patch) next.autoContinueFailureLimit = patch.autoContinueFailureLimit
     if ('autoContinueMaxTokensLimit' in patch) next.autoContinueMaxTokensLimit = patch.autoContinueMaxTokensLimit
     if ('continueDelaySec' in patch) next.continueDelaySec = patch.continueDelaySec
+    if ('idleTimeoutSec' in patch) next.idleTimeoutSec = patch.idleTimeoutSec
     if ('keepEventLog' in patch) next.keepEventLog = patch.keepEventLog !== false
     if ('eventLogLimit' in patch) next.eventLogLimit = patch.eventLogLimit
     if ('showSubagentSessions' in patch) next.showSubagentSessions = patch.showSubagentSessions === true

@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
     const MAX_TEMPLATE_NAME = 24
     /** 同一个模型额外重试次数的上限，同样与 lib/constants.js 保持一致。 */
     const MAX_SAME_MODEL_RETRIES = 5
+    /** 与 lib/constants.js 的 MAX_IDLE_TIMEOUT_SEC 一致。 */
+    const MAX_IDLE_TIMEOUT_SEC = 3600
 
     /**
      * 试连接同时发几条。
@@ -205,6 +207,10 @@ window.__ModuleLoader__.load({
         optSameModelRetriesHint:
           '一个模型背后可能挂着几个账号（dsh-our-free-model 这类多账号反代就是这样）。失败一次通常只停用了其中一个账号，把原请求一模一样再发一遍，它就会换个人来答；试满这么多次还不行，才判这个模型今天不行、换队列里的下一个。这些重发不带「继续」——新账号没写过东西，没什么可继续的。',
         optSameModelRetriesUnit: '次',
+        optIdleTimeout: '超过这么久没有输出就换人',
+        optIdleTimeoutHint:
+          '从请求发出去就开始计时，之后每来一个字（包括思考增量）都会重新计时。到点还一个字都没有，就当这个模型卡住了：按失败处理，换队列里的下一个。0 = 不管，愿意等多久就等多久。',
+        optIdleTimeoutUnit: '秒',
         optAllQuarantined: '全部被隔离时仍然按顺序试一遍',
         optAllQuarantinedHint: '关掉后队列里全是隔离模型时会直接报错，不再尝试。',
         optKeepLog: '记录事件日志',
@@ -344,6 +350,10 @@ window.__ModuleLoader__.load({
         optSameModelRetriesHint:
           'One model can sit in front of several accounts (multi-account proxies such as dsh-our-free-model). A failure usually only benches one account, so re-sending the very same request lands on another one. Only after all retries fail is the model treated as broken and the next one tried. These retries carry no "continue" text — a fresh account has written nothing to continue.',
         optSameModelRetriesUnit: 'times',
+        optIdleTimeout: 'Give up when nothing arrives for',
+        optIdleTimeoutHint:
+          'The clock starts when the request goes out and resets on every chunk, reasoning deltas included. If nothing arrives before it runs out, the model is treated as stuck: the attempt counts as a failure and the next one in the queue takes over. 0 = never give up, wait as long as it takes.',
+        optIdleTimeoutUnit: 'sec',
         optAllQuarantined: 'Still try the queue when all are quarantined',
         optAllQuarantinedHint: 'Turned off, an all-quarantined queue fails immediately.',
         optKeepLog: 'Keep an event log',
@@ -569,6 +579,7 @@ window.__ModuleLoader__.load({
         RATE_LIMIT: '被限流',
         SERVER: '服务端错误',
         TIMEOUT: '超时',
+        IDLE_TIMEOUT: '卡住不动了',
         TRANSPORT: '网络中断',
         CONTEXT_WINDOW_EXCEEDED: '上下文超长',
         ABORTED: '被中止',
@@ -1142,6 +1153,21 @@ window.__ModuleLoader__.load({
               }),
               span({ className: 'mf-note' }, t('optSameModelRetriesUnit')),
             ),
+            div({ className: 'mf-opt' },
+              div({ className: 'mf-opt-main' },
+                div(null, t('optIdleTimeout')),
+                div({ className: 'mf-note' }, t('optIdleTimeoutHint')),
+              ),
+              h(NumberInput, {
+                value: settings.idleTimeoutSec ?? 120,
+                min: 0,
+                max: MAX_IDLE_TIMEOUT_SEC,
+                name: 'idleTimeoutSec',
+                disabled: busy || settings.enabled === false,
+                onCommit: (value) => { if (value !== settings.idleTimeoutSec) void run('/settings', { idleTimeoutSec: value }) },
+              }),
+              span({ className: 'mf-note' }, t('optIdleTimeoutUnit')),
+            ),
             h(ToggleRow, {
               label: t('optAllQuarantined'),
               hint: t('optAllQuarantinedHint'),
@@ -1528,6 +1554,10 @@ window.__ModuleLoader__.load({
       const activeTemplate = typeof active?.templateName === 'string' && active.templateName !== ''
         ? active.templateName
         : undefined
+      /** 实时表里那个候选带的模板名（换人的瞬间和 active 会不一样）。 */
+      const runningTemplate = typeof row?.running?.templateName === 'string' && row.running.templateName !== ''
+        ? row.running.templateName
+        : undefined
       // 每个模型胶囊后面跟一个蓝色小框写它的输出速度 —— 已隔离和已验证都要，
       // 因为「它多快」和「它今天行不行」是两个独立的问题：一个被隔离的模型
       // 可能刚才还跑得飞快（只是最后撞了额度），而那正是值得知道的信息。
@@ -1565,10 +1595,14 @@ window.__ModuleLoader__.load({
           span({ className: 'mf-qv-label' }, t('qvActive')),
           // 模板名跟着模型一起报：同一个模型可能同时挂在好几条模板的队列里，
           // 只说模型名答不了「这个会话现在跑的是哪条队列」。
-          span({ className: 'mf-qv-value' }, active === undefined
-            // 还没跑完任何一趟的会话（刚开的对话）只有实时表知道它在用谁。
-            ? (running === undefined ? t('none') : sessionItemLabel(running))
-            : `${sessionItemLabel(active)}${activeTemplate === undefined ? '' : ` · ${t('qvTemplate', { name: activeTemplate })}`}`),
+          //
+          // 正在跑的时候以**实时表**为准，不以「上一趟跑的是谁」为准：换人的那一
+          // 瞬间两者不一样，而用户此刻要看的恰恰是「现在是谁在读上下文」。
+          span({ className: 'mf-qv-value' }, running !== undefined
+            ? `${sessionItemLabel(running)}${runningTemplate === undefined ? '' : ` · ${t('qvTemplate', { name: runningTemplate })}`}`
+            : (active === undefined
+                ? t('none')
+                : `${sessionItemLabel(active)}${activeTemplate === undefined ? '' : ` · ${t('qvTemplate', { name: activeTemplate })}`}`)),
         ),
         div({ className: 'mf-qv-line' },
           span({ className: 'mf-qv-label' }, t('qvQuarantined')),

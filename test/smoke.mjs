@@ -857,6 +857,71 @@ await check('重试次数设 0：每换个模型只试一次', async () => {
   assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('beta', 'one')])
 })
 
+// 8.5 · 卡住超时：太久没有输出就当失败，换人
+await check('卡住超时：连着设定的秒数一个字都不吐，就当失败换人', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }, { provider: 'beta', model: 'one' }],
+    settings: { idleTimeoutSec: 1, sameModelRetries: 0 },
+    // 挂着不回：既不吐 chunk 也不结束 —— 连接活着，但没有然后。
+    scripts: new Map([
+      [routeKey('alpha', 'one'), () => (async function* () {
+        await new Promise((resolve) => { setTimeout(resolve, 5_000) })
+      })()],
+      [routeKey('beta', 'one'), ok('换我上')],
+    ]),
+  })
+  const startedAt = Date.now()
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')] }))
+  const elapsed = Date.now() - startedAt
+
+  assert.equal(textOf(chunks), '换我上', '卡住的那个被换掉，下一个接着答')
+  assert.deepEqual(commands(h.llm), [routeKey('alpha', 'one'), routeKey('beta', 'one')])
+  assert.ok(elapsed >= 900, `应该真的等满了 1 秒，实际 ${elapsed}ms`)
+  assert.ok(elapsed < 4_000, `不该等满三秒多才动手，实际 ${elapsed}ms`)
+
+  const rows = h.health.view(h.clock.ms, 1).quarantined
+  assert.equal(rows.length, 1, '卡住的模型要进隔离名单')
+  assert.equal(rows[0].code, 'IDLE_TIMEOUT')
+  assert.match(rows[0].message, /超过 1 秒没有任何输出/)
+})
+
+await check('卡住超时：思考增量也算「还在动」，不打断', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    settings: { idleTimeoutSec: 1, sameModelRetries: 0 },
+    // 每 400ms 吐一个 reasoning 增量，连吐三次，正好跨过 1 秒的线。
+    scripts: new Map([[routeKey('alpha', 'one'), () => (async function* () {
+      for (let i = 0; i < 3; i += 1) {
+        await new Promise((resolve) => { setTimeout(resolve, 400) })
+        yield { type: 'reasoning-delta', text: '嗯' }
+      }
+      yield { type: 'block-end', block: { type: 'reasoning' } }
+      yield { type: 'text-delta', text: '想好了' }
+      yield { type: 'block-end', block: { type: 'text' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')] }))
+  assert.equal(textOf(chunks), '想好了', '一直在动就不该被判成卡住')
+  assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0, '什么都没坏，不该隔离')
+})
+
+await check('卡住超时设 0 = 不管：愿意等多久就等多久', async () => {
+  const h = await harness({
+    order: [{ provider: 'alpha', model: 'one' }],
+    settings: { idleTimeoutSec: 0, sameModelRetries: 0 },
+    scripts: new Map([[routeKey('alpha', 'one'), () => (async function* () {
+      await new Promise((resolve) => { setTimeout(resolve, 1_200) })
+      yield { type: 'text-delta', text: '慢是慢，但来了' }
+      yield { type: 'block-end', block: { type: 'text' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()]]),
+  })
+  const chunks = await drain(h.adapter.stream({ provider: ROUTE, model: 'auto', messages: [user('写')] }))
+  assert.equal(textOf(chunks), '慢是慢，但来了')
+  assert.equal(h.health.view(h.clock.ms, 1).quarantined.length, 0)
+})
+
 // 9 · 补发节奏：每次换人带「继续」之前先等一等
 await check('补发节奏：每次「继续」之前都先等一等，首次请求不等', async () => {
   const h = await harness({

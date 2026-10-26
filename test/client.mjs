@@ -318,6 +318,7 @@ const initialState = () => ({
     resetHour: 1,
     retrySameModelOnce: true,
     sameModelRetries: 2,
+    idleTimeoutSec: 120,
     continueText: '继续',
     hiddenProviders: [],
     retryWhenAllQuarantined: true,
@@ -904,6 +905,42 @@ await check('隔离队列：有会话正在跑时挂「运行中」标记，轮�
   assert.ok(used.includes(15000), `闲下来要退回 15 秒，实际 ${used.join(', ')}`)
 })
 
+await check('隔离队列：换人的那一瞬间，「正在用」报的是正在读上下文的那个，不是上一个', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({
+      sessionId: 's-swap',
+      // 上一趟是 alpha，它刚报错进隔离；此刻 beta 正在读上下文。
+      active: { provider: 'alpha', model: 'one', at, label: '硅基流动 · Alpha One', templateId: 'default', templateName: '默认模板' },
+      running: { provider: 'beta', model: 'one', at, label: 'Code99 · Beta One', templateId: 'default', templateName: '默认模板' },
+    }),
+  ])
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-swap', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('Code99 · Beta One'), '要报正在跑的那个')
+  assert.equal(flat.includes('硅基流动 · Alpha One'), false, '不能还挂着上一个模型')
+})
+
+await check('隔离队列：没人跑的时候才回落到「上一趟是谁」', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => sessionsPayload([
+    sessionRow({ sessionId: 's-rest', active: { provider: 'gamma', model: 'two', at, label: '信通院 · Gamma Two' } }),
+  ])
+  let flat
+  try {
+    flat = fresh.text(await fresh.mount(queue({ sessionId: 's-rest', t })))
+  } finally {
+    globalThis.fetch = saved
+  }
+  assert.ok(flat.includes('信通院 · Gamma Two'), '闲下来之后仍要说清上一趟是谁')
+})
+
 await check('隔离队列：当前会话那一行有标记，别的会话没有', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
@@ -1274,7 +1311,7 @@ globalThis.fetch = async (url, init = {}) => {
         }))
       }
       if (typeof body.editedTemplate === 'string') current.settings.editedTemplate = body.editedTemplate
-      for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec', 'showSubagentSessions', 'showForeignSessions']) {
+      for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'idleTimeoutSec', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec', 'showSubagentSessions', 'showForeignSessions']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
     }
@@ -1486,6 +1523,42 @@ await check('模型异常：重试次数允许填 0（每个模型只试一次�
   sameModelInput().props.onChange({ target: { value: '2' } })
   await runtime.mount(page(props))
   sameModelInput().props.onBlur()
+  await runtime.mount(page(props))
+})
+
+/** 「多久没输出算卡住」那个框（0-3600，靠 data-name 认）。 */
+const idleTimeoutInput = () => runtime.find(
+  (node) => node.tag === 'input' && node.props['data-name'] === 'idleTimeoutSec',
+)
+
+await check('模型异常：卡住超时显示宿主的值，失焦后 POST idleTimeoutSec 并夹到 0-3600', async () => {
+  assert.equal(idleTimeoutInput().props.value, '120', '应显示宿主设置里的值')
+  assert.equal(idleTimeoutInput().props.disabled, false, '接力开着时可改')
+
+  const before = requests.length
+  idleTimeoutInput().props.onChange({ target: { value: '99999' } })
+  await runtime.mount(page(props))
+  idleTimeoutInput().props.onBlur()
+  await runtime.mount(page(props))
+
+  const posts = requests.slice(before).filter((row) => row.method === 'POST')
+  assert.equal(posts.length, 1)
+  assert.deepEqual(posts[0].body, { idleTimeoutSec: 3600 }, '夹到硬上限一小时')
+  assert.equal(current.settings.idleTimeoutSec, 3600)
+
+  // 0 = 不管，必须能存进去 —— 想「愿意等多久就等多久」的人只有这一个办法。
+  const zeroBefore = requests.length
+  idleTimeoutInput().props.onChange({ target: { value: '0' } })
+  await runtime.mount(page(props))
+  idleTimeoutInput().props.onBlur()
+  await runtime.mount(page(props))
+  const zeroPosts = requests.slice(zeroBefore).filter((row) => row.method === 'POST')
+  assert.deepEqual(zeroPosts[0].body, { idleTimeoutSec: 0 }, '0 是合法值，不能被当成「没填」')
+  assert.equal(current.settings.idleTimeoutSec, 0)
+
+  idleTimeoutInput().props.onChange({ target: { value: '120' } })
+  await runtime.mount(page(props))
+  idleTimeoutInput().props.onBlur()
   await runtime.mount(page(props))
 })
 
