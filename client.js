@@ -94,7 +94,7 @@ window.__ModuleLoader__.load({
 .mf-text:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); background: color-mix(in srgb, currentColor 5%, transparent); }
 .mf-btn { font: inherit; color: inherit; background: transparent; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 3px 9px; cursor: pointer; }
 /* 导入按钮是个 label（原生 file input 没法做成按钮），照 .mf-btn 的样子画。 */
-.mf-btn-file { display: inline-block; text-align: center; }
+.mf-btn-file { position: relative; display: inline-block; text-align: center; }
 .mf-btn[data-off='1'], .mf-btn:disabled { opacity: .45; cursor: default; }
 .mf-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 10%, transparent); }
 .mf-btn:disabled { opacity: .35; cursor: default; }
@@ -147,8 +147,10 @@ window.__ModuleLoader__.load({
 .mf-confirm { display: flex; flex-direction: column; gap: 6px; margin: 2px 8px 6px 38px; padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, #e5484d 45%, transparent); background: color-mix(in srgb, #e5484d 8%, transparent); font-size: 12px; }
 .mf-confirm-row { display: flex; gap: 8px; align-items: center; }
 .mf-danger { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
-/* 导入用的文件选择框藏起来，由外面那个 label 当按钮用 —— 原生 file input 改不了样式。 */
-.mf-file { display: none; }
+/* 导入用的文件选择框藏起来，由外面那个 label 当按钮用 —— 原生 file input 改不了样式。
+   用「视觉隐藏」而不是 display:none：后者在部分浏览器里会让 label 的点击不再转发给
+   file input，对话框根本弹不出来（测试里是直接调 onChange，查不出这种问题）。 */
+.mf-file { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; clip: rect(0 0 0 0); }
 /* 被隐藏的路由：它们不在清单里，所以只能单独列出来让人撤销。 */
 .mf-hidden { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
 .mf-hidden-item { display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px; border-radius: 999px; border: 1px dashed color-mix(in srgb, #e5484d 45%, transparent); font-size: 11.5px; }
