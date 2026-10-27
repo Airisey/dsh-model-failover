@@ -1383,6 +1383,22 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     })
     assert.equal('reasoningEffort' in blank.json.settings.templates[0].order[0], false, '空白档位应被收敛成「没设」')
 
+    // 模板数量**没有上限**：早先有一道 8 的闸，导入别人给的模板文件被截掉
+    // 一半才是真的莫名其妙。这里一次写 12 条，一条都不许少。
+    const many = await call('POST', '/api/dsh-model-failover/settings', {
+      templates: Array.from({ length: 12 }, (_item, index) => ({
+        id: `t${index}`,
+        name: `模板 ${index + 1}`,
+        order: [{ provider: 'alpha', model: 'one' }],
+      })),
+    })
+    assert.equal(many.json.settings.templates.length, 12, '模板数量不该被截断')
+    assert.deepEqual(many.json.settings.templates.map((item) => item.id), Array.from({ length: 12 }, (_item, index) => `t${index}`))
+    // 收尾：把设置写回单模板，后面的用例都按「只有一条默认模板」的假设走。
+    await call('POST', '/api/dsh-model-failover/settings', {
+      templates: [{ id: 'default', name: '默认模板', order: [{ provider: 'beta', model: 'one' }, { provider: 'alpha', model: 'one' }] }],
+    })
+
     // 非法值被就地修好，而不是留给执行路径
     const clamped = await call('POST', '/api/dsh-model-failover/settings', { resetHour: 99, eventLogLimit: 0 })
     assert.equal(clamped.json.settings.resetHour, 1, '非法的重置时间应回落到默认值')

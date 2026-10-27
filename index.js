@@ -31,7 +31,6 @@ import {
   DEFAULT_TEMPLATE_ID,
   DEFAULT_TEMPLATE_NAME,
   MAX_IDLE_TIMEOUT_SEC,
-  MAX_TEMPLATES,
   MAX_SAME_MODEL_RETRIES,
   MAX_TEMPLATE_CANDIDATES,
   MAX_TEMPLATE_NAME,
@@ -141,6 +140,10 @@ function normalizeTemplateId(raw, fallback) {
 /**
  * 队列模板：至少一条、id 唯一。
  *
+ * 模板数**不设上限**：最早有一道 8 的闸，理由是「模型选择器里别多出太多条」，
+ * 但那本来就只是个下拉框，自己建了多少条心里有数；反过来，导入一份别人给
+ * 的模板文件被闸门截掉一半，才是真的莫名其妙。
+ *
  * 老版本只有一个扁平的 `order`（这一层还没有模板）。读到那种设置时把它整份
  * 灌进默认模板 —— 升级之后队列还在，只是从「一条队列」变成「默认模板」。
  */
@@ -149,7 +152,6 @@ function normalizeTemplates(source) {
   const templates = []
   const seen = new Set()
   for (const item of raw ?? []) {
-    if (templates.length >= MAX_TEMPLATES) break
     if (item === null || typeof item !== 'object') continue
     const fallback = `t${templates.length}`
     let id = normalizeTemplateId(item.id, fallback)

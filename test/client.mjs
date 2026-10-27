@@ -402,11 +402,30 @@ const runtime = new Runtime()
 // 客户端全局：加载器、document、navigator。
 const loaded = []
 const styleSheets = []
+// 下载：`saveText()` 走 Blob + 隐藏 <a download>，这里把每次「存文件」记下来。
+// 真实的 URL.createObjectURL / revokeObjectURL 一并替身，免得不小心真建 blob。
+const downloads = []
+const objectUrls = []
+const realCreateObjectURL = URL.createObjectURL
+const realRevokeObjectURL = URL.revokeObjectURL
+URL.createObjectURL = (blob) => { objectUrls.push(blob); return `blob:stub/${objectUrls.length}` }
+URL.revokeObjectURL = () => {}
 const documentStub = {
   baseURI: 'http://127.0.0.1:19387/',
   documentElement: { lang: 'zh-CN' },
   head: { appendChild: (node) => styleSheets.push(node) },
-  createElement: () => ({ setAttribute() {}, remove() {}, textContent: '' }),
+  body: { appendChild: () => {} },
+  createElement: (tag) => {
+    const node = {
+      tag,
+      style: {},
+      setAttribute() {},
+      remove() {},
+      textContent: '',
+      click() { downloads.push({ tag, href: node.href, download: node.download }) },
+    }
+    return node
+  },
 }
 
 // setInterval 换成不排程的替身：真实定时器会把这个测试进程挂住。
@@ -2219,11 +2238,11 @@ await check('被隐藏的路由：点「恢复」把它从 hiddenProviders 里�
 
 // ── 导出 / 导入模板 ─────────────────────────────────────────────────────────
 
-await check('导出模板：点一下把模板导成 JSON、顺手写进剪贴板，且不带任何本机偏好', async () => {
+await check('导出模板：点一下存成一个 JSON 文件，且不带任何本机偏好', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
-  const before = clipboardWrites.length
   globalThis.fetch = async () => payloadResponse(initialState())
+  const before = downloads.length
   try {
     await fresh.mount(page(props))
     const button = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-export')[0]
@@ -2231,8 +2250,12 @@ await check('导出模板：点一下把模板导成 JSON、顺手写进剪贴�
     await button.props.onClick()
     await fresh.mount(page(props))
 
-    assert.equal(clipboardWrites.length, before + 1, '应该写一次剪贴板')
-    const payload = JSON.parse(clipboardWrites[clipboardWrites.length - 1])
+    assert.equal(downloads.length, before + 1, '应该触发一次文件下载')
+    const link = downloads[downloads.length - 1]
+    assert.equal(link.tag, 'a')
+    assert.match(link.download, /^dsh-model-failover-\d{4}-\d{2}-\d{2}\.json$/, `文件名实际是 ${link.download}`)
+
+    const payload = JSON.parse(await objectUrls[objectUrls.length - 1].text())
     assert.equal(payload.plugin, 'dsh-model-failover')
     assert.equal(payload.version, 1)
     assert.deepEqual(payload.templates.map((row) => row.name), ['默认模板', '备用模板'])
@@ -2243,17 +2266,31 @@ await check('导出模板：点一下把模板导成 JSON、顺手写进剪贴�
     for (const key of ['hiddenProviders', 'resetHour', 'autoContinue', 'editedTemplate']) {
       assert.equal(key in payload, false, `不该导出 ${key}`)
     }
-    // 导出的 JSON 同时摊在页面上，剪贴板被拦了也能手动复制。
-    const area = fresh.nodes.filter((node) => node.props?.['data-role'] === 'export-json')
-    assert.equal(area.length, 1)
-    assert.equal(area[0].props.readOnly, true)
-    assert.equal(area[0].props.value, clipboardWrites[clipboardWrites.length - 1])
+    const flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
+    assert.ok(flat.includes('exportDone'), `存成功要说一声，实际：${flat.slice(-160)}`)
   } finally {
     globalThis.fetch = saved
   }
 })
 
-await check('导入模板：追加到现有模板后面，id 在本地重新生成，同名的不覆盖', async () => {
+await check('导出模板：浏览器不让存文件时如实说，不谎报成功', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const savedCreate = URL.createObjectURL
+  globalThis.fetch = async () => payloadResponse(initialState())
+  URL.createObjectURL = undefined
+  try {
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-export')[0].props.onClick()
+    const flat = fresh.text(await fresh.mount(page(props)))
+    assert.ok(flat.includes('exportFailed'), `存不了要说清，实际：${flat.slice(-160)}`)
+  } finally {
+    globalThis.fetch = saved
+    URL.createObjectURL = savedCreate
+  }
+})
+
+await check('导入模板：选一个文件就追加到后面，id 在本地重新生成，撞名加 (1)', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
   const state = initialState()
@@ -2270,18 +2307,24 @@ await check('导入模板：追加到现有模板后面，id 在本地重新生�
   }
   try {
     await fresh.mount(page(props))
-    const area = fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
-    await area.props.onChange({ target: { value: JSON.stringify({
-      plugin: 'dsh-model-failover',
-      version: 1,
-      templates: [
-        // 名字撞上现成的「备用模板」：要改名，不能覆盖人家的队列。
-        { name: '备用模板', order: [{ provider: 'delta', model: 'three', reasoningEffort: 'minimal' }] },
-        { name: '同事的队列', order: [{ provider: 'alpha', model: 'one' }] },
-      ],
-    }) } })
-    await fresh.mount(page(props))
-    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    const picker = fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-file')
+    assert.equal(picker.length, 1, '导入是一个文件选择框，不是粘贴框')
+    assert.equal(picker[0].props.type, 'file')
+    assert.equal(picker[0].props.accept, 'application/json,.json')
+    assert.equal(fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json').length, 0, '不该再有粘贴框')
+
+    const file = {
+      text: async () => JSON.stringify({
+        plugin: 'dsh-model-failover',
+        version: 1,
+        templates: [
+          // 名字撞上现成的「备用模板」：加 (1)，不合并、不覆盖。
+          { name: '备用模板', order: [{ provider: 'delta', model: 'three', reasoningEffort: 'minimal' }] },
+          { name: '同事的队列', order: [{ provider: 'alpha', model: 'one' }] },
+        ],
+      }),
+    }
+    await picker[0].props.onChange({ target: { files: [file], value: 'C:\\fakepath\\x.json' } })
     await fresh.mount(page(props))
 
     const post = seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings'))
@@ -2290,7 +2333,7 @@ await check('导入模板：追加到现有模板后面，id 在本地重新生�
     assert.equal(body.templates.length, 4, '两条原有 + 两条导入')
     assert.deepEqual(body.templates.slice(0, 2).map((row) => row.id), ['default', 'spare'], '原有的原样留着')
     const added = body.templates.slice(2)
-    assert.deepEqual(added.map((row) => row.name), ['备用模板 2', '同事的队列'], '撞名加后缀')
+    assert.deepEqual(added.map((row) => row.name), ['备用模板 (1)', '同事的队列'], '撞名加 (1)')
     assert.match(added[0].id, /^i[a-z0-9]+0$/, `id 在本地生成，实际是 ${added[0].id}`)
     assert.notEqual(added[0].id, 'spare', '不能复用现成的 id')
     assert.deepEqual(added[0].order, [{ provider: 'delta', model: 'three', reasoningEffort: 'minimal' }], '档位跟着走')
@@ -2300,7 +2343,39 @@ await check('导入模板：追加到现有模板后面，id 在本地重新生�
   }
 })
 
-await check('导入模板：粘贴的不是 JSON、或者里面没有模板，都如实说，不写坏设置', async () => {
+await check('导入模板：连着撞名就一路 (1)、(2)，只跟名字较劲不合并', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  // 先把现有模板改成「备用模板」和「备用模板 (1)」，第三个同名就该拿 (2)。
+  state.settings.templates = [
+    { id: 'default', name: '备用模板', order: [] },
+    { id: 'spare', name: '备用模板 (1)', order: [] },
+  ]
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? 'GET'
+    const body = init.body === undefined ? undefined : JSON.parse(init.body)
+    seen.push({ url: String(url), method, body })
+    if (method === 'POST' && String(url).endsWith('/settings') && Array.isArray(body?.templates)) {
+      state.settings.templates = body.templates.map((template) => ({ ...template }))
+    }
+    return payloadResponse(state)
+  }
+  try {
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-file')[0].props.onChange({
+      target: { files: [{ text: async () => JSON.stringify({ templates: [{ name: '备用模板', order: [] }] }) }], value: '' },
+    })
+    await fresh.mount(page(props))
+    const body = seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings'))[0].body
+    assert.deepEqual(body.templates.map((row) => row.name), ['备用模板', '备用模板 (1)', '备用模板 (2)'])
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('导入模板：不是 JSON、或者里面没有模板，都如实说，不写坏设置', async () => {
   const fresh = new Runtime()
   const saved = globalThis.fetch
   const seen = []
@@ -2311,24 +2386,26 @@ await check('导入模板：粘贴的不是 JSON、或者里面没有模板，�
   try {
     await fresh.mount(page(props))
     const posts = () => seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings')).length
+    const pick = (file) => fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-file')[0]
+      .props.onChange({ target: { files: [file], value: '' } })
 
-    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
-      .props.onChange({ target: { value: '这不是 JSON' } })
-    await fresh.mount(page(props))
-    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    await pick({ text: async () => '这不是 JSON' })
     await fresh.mount(page(props))
     let flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
     assert.ok(flat.includes('importBad'), `坏 JSON 要报出来，实际：${flat.slice(-200)}`)
     assert.equal(posts(), 0, '坏 JSON 不该写回去')
 
-    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
-      .props.onChange({ target: { value: JSON.stringify({ templates: [{ name: '', order: [] }, { order: [] }] }) } })
-    await fresh.mount(page(props))
-    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    await pick({ text: async () => JSON.stringify({ templates: [{ name: '', order: [] }, { order: [] }] }) })
     await fresh.mount(page(props))
     flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
     assert.ok(flat.includes('importNothing'), `没有可用模板时要说清，实际：${flat.slice(-200)}`)
     assert.equal(posts(), 0, '没有可用模板也不该写回去')
+
+    await pick({ text: async () => { throw new Error('设备未就绪') } })
+    await fresh.mount(page(props))
+    flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
+    assert.ok(flat.includes('importReadFailed'), `读不出文件也要说清，实际：${flat.slice(-200)}`)
+    assert.equal(posts(), 0, '读不出文件更不该写回去')
   } finally {
     globalThis.fetch = saved
   }

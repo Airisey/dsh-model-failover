@@ -33,8 +33,7 @@ window.__ModuleLoader__.load({
     const API_PREFIX = '/api/dsh-model-failover'
     const ROUTE = 'model-failover'
     const CLIENT_NAME = 'model-failover'
-    /** 模板数量与名字长度的上限，与 lib/constants.js 保持一致。 */
-    const MAX_TEMPLATES = 8
+    /** 模板名长度的上限，与 lib/constants.js 保持一致。模板数量不设上限。 */
     const MAX_TEMPLATE_NAME = 24
     /** 同一个模型额外重试次数的上限，同样与 lib/constants.js 保持一致。 */
     const MAX_SAME_MODEL_RETRIES = 5
@@ -94,6 +93,9 @@ window.__ModuleLoader__.load({
 .mf-text:hover:not(:disabled) { border-color: color-mix(in srgb, currentColor 18%, transparent); }
 .mf-text:focus { outline: none; border-color: color-mix(in srgb, currentColor 40%, transparent); background: color-mix(in srgb, currentColor 5%, transparent); }
 .mf-btn { font: inherit; color: inherit; background: transparent; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 3px 9px; cursor: pointer; }
+/* 导入按钮是个 label（原生 file input 没法做成按钮），照 .mf-btn 的样子画。 */
+.mf-btn-file { display: inline-block; text-align: center; }
+.mf-btn[data-off='1'], .mf-btn:disabled { opacity: .45; cursor: default; }
 .mf-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 10%, transparent); }
 .mf-btn:disabled { opacity: .35; cursor: default; }
 .mf-btn.mf-icon { padding: 3px 7px; line-height: 1; }
@@ -145,8 +147,8 @@ window.__ModuleLoader__.load({
 .mf-confirm { display: flex; flex-direction: column; gap: 6px; margin: 2px 8px 6px 38px; padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, #e5484d 45%, transparent); background: color-mix(in srgb, #e5484d 8%, transparent); font-size: 12px; }
 .mf-confirm-row { display: flex; gap: 8px; align-items: center; }
 .mf-danger { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
-/* 导入模板用的文本框：粘贴一段 JSON 就行，不碰文件系统。 */
-.mf-json { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 6px 8px; width: 100%; box-sizing: border-box; min-height: 66px; resize: vertical; }
+/* 导入用的文件选择框藏起来，由外面那个 label 当按钮用 —— 原生 file input 改不了样式。 */
+.mf-file { display: none; }
 /* 被隐藏的路由：它们不在清单里，所以只能单独列出来让人撤销。 */
 .mf-hidden { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
 .mf-hidden-item { display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px; border-radius: 999px; border: 1px dashed color-mix(in srgb, #e5484d 45%, transparent); font-size: 11.5px; }
@@ -184,7 +186,7 @@ window.__ModuleLoader__.load({
         templateEditing: '正在编辑',
         templateDelete: '删除这个模板',
         templateAdd: '新建模板',
-        templateAddHint: '最多 8 个。新建出来是空队列，从下面把模型加进去。',
+        templateAddHint: '新建出来是空队列，从下面把模型加进去。',
         templateProbe: '测试连接',
         templateProbeHint:
           '把这条队列里的模型挨个试一次，结果显示在下面每个模型名字后面。只发一句「hi」，花不了几个 token；结果关掉设置页就没了。',
@@ -312,19 +314,14 @@ window.__ModuleLoader__.load({
           '这些路由被整体藏起来了，它们的模型不会出现在上面的「添加模型」里，也不会被队列选中。这一栏就是撤销它的地方 —— 早先这个开关只有配置文件里有，界面看不见，模型「凭空少了一批」时很难查到原因。',
         hiddenShow: '恢复',
         exportTemplates: '导出模板',
-        exportHint: '把所有模板导成一段 JSON，复制走就能存下来或者发给别人。',
-        exportCopy: '复制到剪贴板',
-        exportCopied: '已复制到剪贴板',
-        exportSelect: '复制失败，请手动选中下面的文本复制',
+        exportHint: '「导出模板」把所有模板存成一个 JSON 文件，「导入模板」从这样的文件里把它们加回来。',
+        exportDone: '已经存成文件了。',
+        exportFailed: '这个浏览器不让存文件，导出失败。',
         importTemplates: '导入模板',
-        importHint: '粘贴之前导出的 JSON。导入的模板会**追加**到现有模板后面，同名的会改名，不会覆盖你现在的队列。',
-        importPlaceholder: '在这里粘贴模板 JSON…',
-        importRun: '导入',
-        importEmpty: '还没有粘贴内容。',
-        importBad: '这段内容不是有效的模板 JSON：{message}',
+        importBad: '这个文件不是有效的模板 JSON：{message}',
+        importReadFailed: '读不出这个文件：{message}',
         importNothing: '里面没有可用的模板。',
-        importDone: '导入了 {count} 个模板。',
-        importLimit: '最多只能有 {max} 个模板，这次只导入了前 {count} 个。',
+        importDone: '导入了 {count} 个模板，追加在最前面编辑的那条后面。',
       },
       en: {
         nav: 'Model Relay',
@@ -348,7 +345,7 @@ window.__ModuleLoader__.load({
         templateEditing: 'Editing',
         templateDelete: 'Delete this template',
         templateAdd: 'New template',
-        templateAddHint: 'Up to 8. A new one starts empty — add models below.',
+        templateAddHint: 'A new one starts empty — add models below.',
         templateProbe: 'Test',
         templateProbeHint:
           'Pings every model in this queue once and shows the result next to each name below. It only sends “hi”, so it costs almost nothing; the results are gone once you close this page.',
@@ -476,19 +473,14 @@ window.__ModuleLoader__.load({
           'These providers are hidden wholesale: their models never appear in “Add model” above and are never picked by a queue. This is where you undo that — the switch used to live only in the config file, so when a batch of models “just disappeared” there was nothing in the UI to point at.',
         hiddenShow: 'Restore',
         exportTemplates: 'Export templates',
-        exportHint: 'Turn every template into a block of JSON you can keep or hand to someone else.',
-        exportCopy: 'Copy to clipboard',
-        exportCopied: 'Copied to the clipboard',
-        exportSelect: 'Copy failed — select the text below and copy it by hand',
+        exportHint: '“Export templates” saves every template as a JSON file; “Import templates” adds them back from such a file.',
+        exportDone: 'Saved to a file.',
+        exportFailed: 'This browser would not let the page save a file.',
         importTemplates: 'Import templates',
-        importHint: 'Paste JSON from an earlier export. Imported templates are **appended** to the ones you have; name clashes get renamed, your current queues are never overwritten.',
-        importPlaceholder: 'Paste template JSON here…',
-        importRun: 'Import',
-        importEmpty: 'Nothing pasted yet.',
-        importBad: 'That is not valid template JSON: {message}',
+        importBad: 'That file is not valid template JSON: {message}',
+        importReadFailed: 'Could not read that file: {message}',
         importNothing: 'No usable template in there.',
-        importDone: 'Imported {count} template(s).',
-        importLimit: 'At most {max} templates — only the first {count} were imported.',
+        importDone: 'Imported {count} template(s), appended after the one being edited.',
       },
     }
 
@@ -576,6 +568,34 @@ window.__ModuleLoader__.load({
         const ok = document.execCommand('copy') === true
         area.remove()
         return ok
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * 把一段文字存成文件下载下来，返回是否成功。
+     *
+     * 走 Blob + 一个隐藏的 `<a download>`：设置页跑在浏览器里，这是不需要后端
+     * 配合就能落盘的唯一办法。任何一环缺失（老浏览器、被策略拦掉）都返回 false，
+     * 让调用方如实说，而不是假装存过了。
+     */
+    function saveText(filename, text) {
+      try {
+        if (typeof Blob !== 'function' || typeof URL?.createObjectURL !== 'function') return false
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+        try {
+          const link = document.createElement('a')
+          link.href = url
+          link.download = filename
+          link.style.display = 'none'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          return true
+        } finally {
+          URL.revokeObjectURL?.(url)
+        }
       } catch {
         return false
       }
@@ -698,10 +718,8 @@ window.__ModuleLoader__.load({
       const [probes, setProbes] = useState({})
       /** 正在测哪个模板（空串 = 没有在测）。 */
       const [probingId, setProbingId] = useState('')
-      /** 导入模板的粘贴框内容，以及上一次导入的结果（空串 = 还没导过）。 */
-      const [importText, setImportText] = useState('')
+      /** 上一次导入/导出的结果（空串 = 还没导过）。 */
       const [importNote, setImportNote] = useState('')
-      const [exported, setExported] = useState('')
       const [, setTick] = useState(0)
       const alive = useRef(true)
 
@@ -881,7 +899,6 @@ window.__ModuleLoader__.load({
        * 同一个页面连点两次也能拿到两个不同的 id。
        */
       const createTemplate = useCallback(() => {
-        if (templates.length >= MAX_TEMPLATES) return
         const id = `t${Date.now().toString(36)}`
         const name = `${t('templateNewName')} ${templates.length + 1}`
         void run('/settings', { templates: [...templates, { id, name, order: [] }], editedTemplate: id })
@@ -914,13 +931,13 @@ window.__ModuleLoader__.load({
       }, [settings, run, load])
 
       /**
-       * 把所有模板导成 JSON。
+       * 把所有模板导成一个 JSON 文件下载下来。
        *
        * 只带模板本身（名字 + 队列），不带任何设置项：这份东西是拿来备份队列、
-       * 或者贴给别人复刻一条队列的，掺进 `hiddenProviders`、重置时刻这些本机
+       * 或者发给别人复刻一条队列的，掺进 `hiddenProviders`、重置时刻这些本机
        * 偏好，导入到别人机器上就成了「顺手改了他的设置」。
        */
-      const exportAll = useCallback(async () => {
+      const exportAll = useCallback(() => {
         const payload = JSON.stringify({
           plugin: 'dsh-model-failover',
           version: 1,
@@ -933,21 +950,27 @@ window.__ModuleLoader__.load({
             )),
           })),
         }, null, 2)
-        setExported(payload)
-        const ok = await copyText(payload)
-        setNotice(ok ? t('exportCopied') : t('exportSelect'))
+        const stamp = new Date().toISOString().slice(0, 10)
+        const saved = saveText(`dsh-model-failover-${stamp}.json`, payload)
+        setImportNote(saved ? t('exportDone') : t('exportFailed'))
       }, [templates, t])
 
       /**
-       * 把粘贴进来的一段 JSON 追加成模板。
+       * 把选中的文件里的模板追加到末尾。
        *
        * 追加而不是替换：导入的语义是「把别人的队列搬过来」，不是「覆盖我现在的」。
-       * id 一律在本地重新生成，名字撞了就加后缀 —— 导出的 JSON 里没有 id，正是
+       * id 一律在本地重新生成，名字撞了就加 `(1)` —— 导出的 JSON 里没有 id，正是
        * 为了让同一份文件能导进任意一台机器而不打架。
        */
-      const importAll = useCallback(() => {
-        const text = importText.trim()
-        if (text === '') { setImportNote(t('importEmpty')); return }
+      const importFile = useCallback(async (file) => {
+        if (file === undefined || file === null) return
+        let text = ''
+        try {
+          text = await file.text()
+        } catch (failure) {
+          setImportNote(t('importReadFailed', { message: String(failure?.message ?? failure) }))
+          return
+        }
         let parsed
         try {
           parsed = JSON.parse(text)
@@ -974,28 +997,30 @@ window.__ModuleLoader__.load({
           cleaned.push({ name, order })
         }
         if (cleaned.length === 0) { setImportNote(t('importNothing')); return }
-        const room = Math.max(0, MAX_TEMPLATES - templates.length)
+        // 名字撞了就加 (1)、(2)……：只跟名字较劲，不合并、不改动已有的那些。
         const taken = new Set(templates.map((template) => template.name))
         const stamp = Date.now().toString(36)
-        const added = cleaned.slice(0, room).map((row, index) => {
+        const added = cleaned.map((row, index) => {
           let name = row.name
-          let suffix = 2
-          while (taken.has(name)) {
-            name = `${row.name.slice(0, MAX_TEMPLATE_NAME - 3)} ${suffix}`.slice(0, MAX_TEMPLATE_NAME)
-            suffix += 1
+          if (taken.has(name)) {
+            const suffix = ' (1)'
+            const base = row.name.slice(0, MAX_TEMPLATE_NAME - suffix.length)
+            name = `${base}${suffix}`
+            let serial = 2
+            while (taken.has(name)) {
+              const next = ` (${serial})`
+              name = `${row.name.slice(0, MAX_TEMPLATE_NAME - next.length)}${next}`
+              serial += 1
+            }
           }
           taken.add(name)
           return { id: `i${stamp}${index}`, name, order: row.order }
         })
-        if (added.length === 0) { setImportNote(t('importLimit', { max: MAX_TEMPLATES, count: 0 })); return }
         const next = [...templates, ...added]
         void run('/settings', { templates: next, editedTemplate: added[0].id }).then(() => {
-          setImportText('')
-          setImportNote(added.length < cleaned.length
-            ? t('importLimit', { max: MAX_TEMPLATES, count: added.length })
-            : t('importDone', { count: added.length }))
+          setImportNote(t('importDone', { count: added.length }))
         })
-      }, [importText, templates, run, t])
+      }, [templates, run, t])
 
       /**
        * 把一个模板里的模型挨个试一遍连接。
@@ -1204,7 +1229,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'mf-btn',
               'data-role': 'template-add',
-              disabled: busy || templates.length >= MAX_TEMPLATES,
+              disabled: busy,
               onClick: createTemplate,
             }, t('templateAdd')),
             span({ className: 'mf-note' }, t('templateAddHint')),
@@ -1213,6 +1238,9 @@ window.__ModuleLoader__.load({
           // ── 导出 / 导入 ────────────────────────────────────────────────────
           // 放在模板卡里，紧挨着它们描述的那些队列 —— 备份和搬迁是同一个
           // 动作的两半，拆到两个卡片里只会让人各找一半。
+          //
+          // 两颗按钮就是全部：导出一份文件、导入一份文件。不设粘贴框 ——
+          // 一个要人先选中再复制的输入框，比一次系统文件对话框更容易出错。
           div({ className: 'mf-note' }, t('exportHint')),
           div({ className: 'mf-add' },
             h('button', {
@@ -1220,44 +1248,26 @@ window.__ModuleLoader__.load({
               className: 'mf-btn',
               'data-role': 'template-export',
               disabled: busy || templates.length === 0,
-              onClick: () => void exportAll(),
+              onClick: exportAll,
             }, t('exportTemplates')),
-            h('button', {
-              type: 'button',
-              className: 'mf-btn',
-              'data-role': 'export-copy',
-              disabled: exported === '',
-              onClick: () => { void copyText(exported).then((ok) => setNotice(ok ? t('exportCopied') : t('exportSelect'))) },
-            }, t('exportCopy')),
-          ),
-          exported === ''
-            ? null
-            : h('textarea', {
-                className: 'mf-json',
-                readOnly: true,
-                'data-role': 'export-json',
-                value: exported,
-                rows: 6,
-                onFocus: (event) => event?.currentTarget?.select?.(),
+            // 原生 file input 改不了样式，由外面这个 label 当按钮用。
+            h('label', { className: 'mf-btn mf-btn-file' },
+              t('importTemplates'),
+              h('input', {
+                type: 'file',
+                className: 'mf-file',
+                accept: 'application/json,.json',
+                'data-role': 'import-file',
+                disabled: busy,
+                onChange: (event) => {
+                  const file = event?.target?.files?.[0]
+                  // 同一个文件连选两次也要能触发：不清空 value 的话，
+                  // 浏览器认为「值没变」，第二次选它不会再发 change 事件。
+                  if (event?.target !== undefined) event.target.value = ''
+                  void importFile(file)
+                },
               }),
-          div({ className: 'mf-note' }, t('importHint')),
-          h('textarea', {
-            className: 'mf-json',
-            'data-role': 'import-json',
-            placeholder: t('importPlaceholder'),
-            value: importText,
-            rows: 4,
-            disabled: busy,
-            onChange: (event) => setImportText(event.target.value),
-          }),
-          div({ className: 'mf-add' },
-            h('button', {
-              type: 'button',
-              className: 'mf-btn',
-              'data-role': 'template-import',
-              disabled: busy || importText.trim() === '' || templates.length >= MAX_TEMPLATES,
-              onClick: importAll,
-            }, t('importRun')),
+            ),
             importNote === '' ? null : span({ className: 'mf-note' }, importNote),
           ),
         ),
