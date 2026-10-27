@@ -1046,10 +1046,10 @@ await check('适配器契约：providerInfo / listModels / resolveModel / retryP
   assert.equal(info.id, 'default')
   assert.equal(info.name, '默认模板')
   assert.equal(info.context.contextWindow, 8192, '应声明队列里最窄的上下文窗口')
-  // 这条路由要面对一串各有各档位表的模型，所以对外只能声明并集；缺省档位留给
-  // 每个候选自己的适配器决定（那才是它「正常使用」时的表现）。
-  assert.deepEqual(info.reasoning.efforts.map((effort) => effort.id), ['low', 'high'], '应声明队列里出现过的档位并集')
-  assert.equal('defaultEffort' in info.reasoning, false, '不替候选声明缺省档位')
+  // 这条路由**一个档位都不声明**：它背后是一串各有各档位表的模型，报并集就是
+  // 说谎 —— 报过的档位在队列变动（或目录还没扫完）之后失效，宿主会拿
+  // UNSUPPORTED_REASONING_EFFORT 把整轮拒掉。档位整体缩回队列内部，见 `#effortFor`。
+  assert.equal('reasoning' in info, false, '模板本身不该有档位表')
 
   const policy = h.adapter.providerRetryPolicy(ROUTE)
   assert.equal(policy.mode, 'normal')

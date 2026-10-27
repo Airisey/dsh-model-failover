@@ -252,6 +252,7 @@ await check('真注册表：宿主校验放行 listModels / resolveModelInfo / r
     const info = await h.app.llm.resolveModelInfo(ROUTE, 'auto')
     assert.equal(info.id, 'auto')
     assert.equal(info.context.contextWindow, 128000, '应报队列里最窄的上下文窗口')
+    assert.equal('reasoning' in info, false, '模板不声明档位，档位由队列行上的设置决定')
 
     // 宿主把适配器给的 retryPolicy 原样采用，llm-retry 读的是顶层字段。
     const policy = h.app.llm.providerRetryPolicy(ROUTE)
@@ -266,7 +267,7 @@ await check('真注册表：宿主校验放行 listModels / resolveModelInfo / r
   }
 })
 
-await check('真宿主：队列的档位并集过得了宿主校验，不认识的档位被宿主挡下', async () => {
+await check('真宿主：这条路由不声明任何档位，谁也别想给它塞一个', async () => {
   const alpha = new StubAdapter('alpha', () => OK('好'))
   const beta = new StubAdapter('beta', () => OK('好'))
   const h = await boot({
@@ -281,26 +282,26 @@ await check('真宿主：队列的档位并集过得了宿主校验，不认识�
     },
   })
   try {
-    // 这条路由要面对一串各有各档位表的模型，所以对外声明的是并集 —— 下面这段
-    // 交给宿主的**真**校验器（resolveCallConfig / UNSUPPORTED_REASONING_EFFORT）
-    // 去判，形状写错的话插件是装不进去的。
-    const info = await h.app.llm.resolveModelInfo(ROUTE, 'auto')
-    assert.deepEqual(
-      info.reasoning.efforts.map((effort) => effort.id),
-      ['low', 'high', 'minimal'],
-      `对外应声明队列里出现过的档位并集：${JSON.stringify(info.reasoning)}`,
-    )
+    // 模板对外**一个档位都不声明**（见 lib/adapter.js 的 resolveModel），下面这段
+    // 交给宿主的**真**校验器去判：队列里明明有 low/high/minimal 三档，这条路由也
+    // 不该认任何一个 —— 认了就意味着「用户选的档位会在队列变动后失效」。
+    const info = await h.app.llm.resolveModelInfo(ROUTE, 'default')
+    assert.equal('reasoning' in info, false, `对外不该有档位表：${JSON.stringify(info.reasoning)}`)
 
-    const prepared = await h.app.llm.prepareCall({ provider: ROUTE, model: 'default', reasoningEffort: 'minimal' })
-    assert.equal(prepared.config.reasoningEffort, 'minimal', '队列里出现过的档位应放行')
-
+    // 真宿主对「模型没声明档位 + 请求里带了档位」的处理是直接拒掉整个调用。
+    // 这正是不声明档位的代价，也是我们想要的：宿主根本不会替这条路由选档位，
+    // 于是不会有「上一轮选过、下一轮失效」这种事。
     await assert.rejects(
-      () => h.app.llm.prepareCall({ provider: ROUTE, model: 'default', reasoningEffort: '不存在的档位' }),
+      () => h.app.llm.prepareCall({ provider: ROUTE, model: 'default', reasoningEffort: 'low' }),
       (error) => {
         assert.equal(error?.code, 'UNSUPPORTED_REASONING_EFFORT', `挡下时的错误码不对：${error?.code} ${error?.message}`)
         return true
       },
     )
+
+    // 不带档位就照常过：这是模型选择器实际会走的那条路。
+    const prepared = await h.app.llm.prepareCall({ provider: ROUTE, model: 'default' })
+    assert.equal(prepared.config.reasoningEffort, undefined, '不选档位时不该凭空补一个')
   } finally {
     h.dispose()
   }
@@ -345,7 +346,7 @@ await check('真宿主：每个候选只收到它自己认识的档位，别的�
   }
 })
 
-await check('真宿主：路由级的档位只在候选没专设、且它认识时下发', async () => {
+await check('真宿主：路由级档位已经无处可来，档位只能在队列行上设', async () => {
   const alpha = new StubAdapter('alpha', () => QUOTA)
   const beta = new StubAdapter('beta', () => OK('换我上'))
   const h = await boot({
@@ -362,18 +363,22 @@ await check('真宿主：路由级的档位只在候选没专设、且它认识�
     },
   })
   try {
-    // 调用方（模型选择器）给「模型接力」选了 minimal：alpha 不认，beta 认。
-    const result = await h.stream('auto', { reasoningEffort: 'minimal' })
-    assert.equal(result.text, '换我上')
-
-    // alpha 不认识 minimal：绝不能收到它（宿主会把 alpha 自己的默认档位补上，
-    // 那是等价的，所以这里只钉「收到的绝不是别人家的档位」）。
-    assert.notEqual(alpha.calls[0].reasoningEffort, 'minimal', 'alpha 不认识 minimal，不该发')
-    assert.ok(
-      alpha.calls[0].reasoningEffort === undefined || alpha.calls[0].reasoningEffort === 'low',
-      `alpha 只该收到自己声明的档位，实际收到 ${alpha.calls[0].reasoningEffort}`,
+    // 有人硬塞一个路由级档位（用户报的正是这个报错）：宿主在调适配器**之前**
+    // 就拒掉整轮。这看着刺眼，但它保证了一件更重要的事 —— 宿主根本不会替这条
+    // 路由记住任何档位，于是不会有「上一轮选过、队列一变就失效」的悬案。
+    const refused = await h.stream('default', { reasoningEffort: 'minimal' })
+    assert.equal(refused.text, '', '被拒的调用一个字都不该产出')
+    assert.equal(refused.finish?.reason?.kind, 'error')
+    assert.equal(
+      refused.finish?.reason?.failure?.code,
+      'UNSUPPORTED_REASONING_EFFORT',
+      `拒掉时的错误码不对：${JSON.stringify(refused.finish?.reason?.failure)}`,
     )
-    assert.equal(beta.calls[0].reasoningEffort, 'minimal', 'beta 认识 minimal，应收到')
+    assert.equal(alpha.calls.length, 0, '被拒的调用不该碰到任何候选')
+
+    // 不塞档位就正常接力 —— 这才是模型选择器实际会走的那条路。
+    const result = await h.stream()
+    assert.equal(result.text, '换我上')
   } finally {
     h.dispose()
   }
