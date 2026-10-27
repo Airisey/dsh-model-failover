@@ -320,7 +320,7 @@ const initialState = () => ({
     sameModelRetries: 2,
     idleTimeoutSec: 120,
     continueText: '继续',
-    hiddenProviders: [],
+    hiddenProviders: ['qodercn'],
     retryWhenAllQuarantined: true,
     autoContinue: true,
     autoContinueOnFailure: true,
@@ -347,6 +347,15 @@ const initialState = () => ({
   ],
   catalogErrors: [],
   catalogScannedAt: at,
+  // 宿主把「扫到过的全部路由」原样下发，**含被隐藏的**：被藏起来的路由恰恰
+  // 不在 catalog 里，设置页要靠这一份才画得出撤销入口。
+  catalogProviders: [
+    { id: 'alpha', name: '硅基流动', hidden: false },
+    { id: 'beta', name: 'Code99', hidden: false },
+    { id: 'gamma', name: 'FutureHub', hidden: false },
+    { id: 'delta', name: '未来枢纽', hidden: false },
+    { id: 'qodercn', name: 'Qoder CN', hidden: true },
+  ],
   quarantined: [
     // 宿主 view() 按判定时间升序排，这里也照这个顺序摆。
     // 隔离按会话算，所以两行挂在不同会话名下 —— 这也是设置页名单的常态。
@@ -1314,6 +1323,13 @@ globalThis.fetch = async (url, init = {}) => {
       for (const key of ['enabled', 'retrySameModelOnce', 'sameModelRetries', 'idleTimeoutSec', 'continueText', 'resetHour', 'keepEventLog', 'eventLogLimit', 'retryWhenAllQuarantined', 'autoContinue', 'autoContinueOnFailure', 'autoContinueOnMaxTokens', 'autoContinueFailureLimit', 'autoContinueMaxTokensLimit', 'continueDelaySec', 'showSubagentSessions', 'showForeignSessions']) {
         if (body[key] !== undefined) current.settings[key] = body[key]
       }
+      if (Array.isArray(body.hiddenProviders)) {
+        current.settings.hiddenProviders = body.hiddenProviders
+        // 宿主恢复一个路由之后会重扫，清单里就又能看到它了 —— 这里跟着翻牌。
+        current.catalogProviders = current.catalogProviders.map((row) => (
+          body.hiddenProviders.includes(row.id) ? { ...row, hidden: true } : { ...row, hidden: false }
+        ))
+      }
     }
     if (String(url).endsWith('/log/clear')) current.events = []
   }
@@ -1322,18 +1338,19 @@ globalThis.fetch = async (url, init = {}) => {
 
 const tree = await runtime.mount(page(props))
 
-await check('挂载后先 POST /refresh 自动扫一次目录，并把队列、提供者名、数据目录渲染出来', () => {
-  // 打开设置页就重扫一次：新接进来的 provider、新登录的账号进来就该在清单里，
-  // 不该先让用户去点一下「重新扫描」。扫描回的是一整份快照，所以不用再拉 /state。
+await check('挂载后只读 /state，不自动重扫：扫描结果跨启动延续，要更新得自己点', () => {
+  // 打开设置页不再顺手扫一遍：清单已经落盘，重启 DSH 之后还在。自动扫会让
+  // 「上次扫到的模型」这种延续变成空话 —— 每次进设置页都重新问一圈 provider，
+  // 慢的时候还要盯着空清单等好几秒。
   assert.deepEqual(requests[0], {
-    method: 'POST',
-    url: '/api/dsh-model-failover/refresh',
-    body: {},
+    method: 'GET',
+    url: '/api/dsh-model-failover/state',
+    body: undefined,
   })
   assert.deepEqual(
-    requests.filter((row) => row.method === 'GET').map((row) => row.url),
+    requests.filter((row) => row.method === 'POST').map((row) => row.url),
     [],
-    '扫描回的已经是快照，不该再单独拉一次 /state',
+    '光是打开设置页，一次扫描都不该发',
   )
   const flat = runtime.text(tree)
   assert.ok(flat.includes('Alpha One'), '应显示第一个候选的模型名')
@@ -1348,18 +1365,11 @@ await check('队列行上不再画隔离/可用徽标：那是按会话算的，
   const badges = runtime.nodes.filter(
     (node) => typeof node.props.className === 'string' && node.props.className.startsWith('mf-badge'),
   )
-  // 「隔离中」在甲会话成立、在乙会话不成立，摆在队列行上只会误导。剩下的徽标
-  // 只该是隔离名单每行右边的那个时间戳：数量与展开箭头对得上，且不带悬停说明
-  // （带 title 的正是被撤掉的那种「隔离中 / 已验证」徽标）。
-  const rowsWithStamp = runtime.nodes.filter(
-    (node) => node.tag === 'button' && node.props['aria-expanded'] !== undefined,
-  )
-  assert.equal(badges.length, rowsWithStamp.length, `徽标只该出现在名单行上，实际：${JSON.stringify(badges.map((node) => node.text))}`)
-  assert.equal(
-    badges.filter((node) => String(node.props.title ?? '') !== '').length,
-    0,
-    '队列徽标那种带悬停说明的徽标不该再有了',
-  )
+  // 「隔离中」在甲会话成立、在乙会话不成立，摆在队列行上只会误导。那张
+  // 「今日隔离名单」卡片也已经撤了，所以设置页里一个徽标都不该剩下。
+  // （模板行的 ✕ 现在也带 `aria-expanded` —— 那是删除确认块，不是徽标，
+  // 所以这里不能再拿它当「名单行」的代理。）
+  assert.equal(badges.length, 0, `设置页不该再有徽标，实际：${JSON.stringify(badges.map((node) => node.text))}`)
 })
 
 // ── 隔离名单已经撤掉 ────────────────────────────────────────────────────────
@@ -2010,6 +2020,100 @@ await check('队列模板：切到另一个模板，队列卡换成它的 queue�
   assert.deepEqual(posts[0].body, { editedTemplate: 'spare' })
 })
 
+// ── 删模板要二次确认 ────────────────────────────────────────────────────────
+
+await check('删模板：先摊出确认块，不点「删掉」就什么也不写', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: String(url), method: init.method ?? 'GET' })
+    return payloadResponse(initialState())
+  }
+  try {
+    await fresh.mount(page(props))
+    const remove = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')[0]
+    // 那颗 ✕ 只是摊开确认块，自己不动手。
+    assert.equal(remove.props['aria-expanded'], 'false', '默认是收着的')
+    await remove.props.onClick()
+    await fresh.mount(page(props))
+
+    const opened = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')[0]
+    assert.equal(opened.props['aria-expanded'], 'true', '点一下摊开确认块')
+    const confirm = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete-confirm')
+    assert.equal(confirm.length, 1, '确认块里应有一颗「删掉」')
+    assert.equal(confirm[0].text, 'templateDeleteYes')
+    const cancel = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete-cancel')
+    assert.equal(cancel.length, 1)
+    assert.equal(cancel[0].text, 'templateDeleteNo')
+    assert.equal(
+      seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings')).length,
+      0,
+      '只是摊开确认块，一个字都不该写回去',
+    )
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('删模板：点「算了」收回去，还是什么都不写', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: String(url), method: init.method ?? 'GET' })
+    return payloadResponse(initialState())
+  }
+  try {
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')[0].props.onClick()
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete-cancel')[0].props.onClick()
+    await fresh.mount(page(props))
+
+    const back = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')[0]
+    assert.equal(back.props['aria-expanded'], 'false', '取消后确认块收回去')
+    assert.equal(
+      fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete-confirm').length,
+      0,
+    )
+    assert.equal(seen.filter((row) => row.method === 'POST').length, 0, '取消之后一个 POST 都不该发')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('删模板：点「删掉」才真的 POST，且写清删的是哪一条', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? 'GET'
+    const body = init.body === undefined ? undefined : JSON.parse(init.body)
+    seen.push({ url: String(url), method, body })
+    if (method === 'POST' && String(url).endsWith('/settings') && Array.isArray(body?.templates)) {
+      state.settings.templates = body.templates
+      if (typeof body.editedTemplate === 'string') state.settings.editedTemplate = body.editedTemplate
+    }
+    return payloadResponse(state)
+  }
+  try {
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete')[0].props.onClick()
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-delete-confirm')[0].props.onClick()
+    await fresh.mount(page(props))
+
+    const posts = seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings'))
+    assert.equal(posts.length, 1)
+    assert.deepEqual(posts[0].body.templates.map((row) => row.id), ['spare'], '默认模板被删掉，只剩备用')
+    assert.equal(posts[0].body.editedTemplate, 'spare', '编辑目标跟着挪到还在的那条')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
 await check('队列模板：新建模板给一个新 id 并自动切过去', async () => {
   const before = requests.length
   const add = runtime.nodes.filter((node) => node.props?.['data-role'] === 'template-add')[0]
@@ -2028,6 +2132,206 @@ await check('队列模板：新建模板给一个新 id 并自动切过去', asy
   assert.match(created.name, /^templateNewName \d+$/, `实际是 ${created.name}`)
   assert.deepEqual(created.order, [])
   assert.equal(body.editedTemplate, created.id, '建完自动切过去')
+})
+
+// ── 被隐藏的路由 ────────────────────────────────────────────────────────────
+//
+// 「模板里加不了 qoder 的模型」曾经是个查不到原因的问题：整个 provider 被
+// `hiddenProviders` 藏掉，清单里连一行都没有，界面上也没有任何地方提到它。
+// 这一栏就是把那个开关搬到台面上。
+
+await check('被隐藏的路由：列出来并说明为什么「加不了它的模型」，还给一颗恢复按钮', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  globalThis.fetch = async () => payloadResponse(initialState())
+  try {
+    await fresh.mount(page(props))
+    const restore = fresh.nodes.filter((node) => node.props?.['data-role'] === 'hidden-restore')
+    assert.equal(restore.length, 1, '只有 qodercn 被藏了')
+    assert.equal(restore[0].props['data-provider'], 'qodercn')
+    assert.equal(restore[0].text, 'hiddenShow')
+    assert.equal(restore[0].props.disabled, false)
+    const all = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
+    assert.ok(all.includes('Qoder CN'), '要写清被藏的是哪个路由')
+    assert.ok(all.includes('hiddenTitle'), '要有小标题')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('被隐藏的路由：没被藏时不画这一栏，不占地方', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  state.settings.hiddenProviders = []
+  state.catalogProviders = state.catalogProviders.map((row) => ({ ...row, hidden: false }))
+  globalThis.fetch = async () => payloadResponse(state)
+  try {
+    await fresh.mount(page(props))
+    assert.equal(
+      fresh.nodes.filter((node) => node.props?.['data-role'] === 'hidden-restore').length,
+      0,
+      '一个都没藏时不该有空壳',
+    )
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('被隐藏的路由：点「恢复」把它从 hiddenProviders 里摘掉，并重扫一次', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? 'GET'
+    const body = init.body === undefined ? undefined : JSON.parse(init.body)
+    seen.push({ url: String(url), method, body })
+    if (method === 'POST' && String(url).endsWith('/settings') && Array.isArray(body?.hiddenProviders)) {
+      state.settings.hiddenProviders = body.hiddenProviders
+      state.catalogProviders = state.catalogProviders.map((row) => ({ ...row, hidden: body.hiddenProviders.includes(row.id) }))
+    }
+    return payloadResponse(state)
+  }
+  try {
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'hidden-restore')[0].props.onClick()
+    await fresh.mount(page(props))
+
+    const post = seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings'))
+    assert.equal(post.length, 1)
+    assert.deepEqual(post[0].body, { hiddenProviders: [] }, '把 qodercn 从名单里摘掉')
+    // 恢复之后必须重扫：藏起来时它的模型根本没进清单，不扫就还是看不到。
+    assert.equal(
+      seen.filter((row) => row.method === 'POST' && row.url.endsWith('/refresh')).length,
+      1,
+      '恢复后重扫一次',
+    )
+    assert.equal(
+      fresh.nodes.filter((node) => node.props?.['data-role'] === 'hidden-restore').length,
+      0,
+      '恢复完这一栏就空了',
+    )
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+// ── 导出 / 导入模板 ─────────────────────────────────────────────────────────
+
+await check('导出模板：点一下把模板导成 JSON、顺手写进剪贴板，且不带任何本机偏好', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const before = clipboardWrites.length
+  globalThis.fetch = async () => payloadResponse(initialState())
+  try {
+    await fresh.mount(page(props))
+    const button = fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-export')[0]
+    assert.equal(button.props.disabled, false)
+    await button.props.onClick()
+    await fresh.mount(page(props))
+
+    assert.equal(clipboardWrites.length, before + 1, '应该写一次剪贴板')
+    const payload = JSON.parse(clipboardWrites[clipboardWrites.length - 1])
+    assert.equal(payload.plugin, 'dsh-model-failover')
+    assert.equal(payload.version, 1)
+    assert.deepEqual(payload.templates.map((row) => row.name), ['默认模板', '备用模板'])
+    assert.equal(payload.templates[0].order.length, 3)
+    // id 刻意不导出：同一份文件要能导进任意一台机器而不打架。
+    assert.equal('id' in payload.templates[0], false)
+    // 设置项一个都不该混进来（`templates` 是这份文件自己的载荷，不算）。
+    for (const key of ['hiddenProviders', 'resetHour', 'autoContinue', 'editedTemplate']) {
+      assert.equal(key in payload, false, `不该导出 ${key}`)
+    }
+    // 导出的 JSON 同时摊在页面上，剪贴板被拦了也能手动复制。
+    const area = fresh.nodes.filter((node) => node.props?.['data-role'] === 'export-json')
+    assert.equal(area.length, 1)
+    assert.equal(area[0].props.readOnly, true)
+    assert.equal(area[0].props.value, clipboardWrites[clipboardWrites.length - 1])
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('导入模板：追加到现有模板后面，id 在本地重新生成，同名的不覆盖', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const state = initialState()
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? 'GET'
+    const body = init.body === undefined ? undefined : JSON.parse(init.body)
+    seen.push({ url: String(url), method, body })
+    if (method === 'POST' && String(url).endsWith('/settings') && Array.isArray(body?.templates)) {
+      state.settings.templates = body.templates.map((template) => ({ ...template }))
+      if (typeof body.editedTemplate === 'string') state.settings.editedTemplate = body.editedTemplate
+    }
+    return payloadResponse(state)
+  }
+  try {
+    await fresh.mount(page(props))
+    const area = fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
+    await area.props.onChange({ target: { value: JSON.stringify({
+      plugin: 'dsh-model-failover',
+      version: 1,
+      templates: [
+        // 名字撞上现成的「备用模板」：要改名，不能覆盖人家的队列。
+        { name: '备用模板', order: [{ provider: 'delta', model: 'three', reasoningEffort: 'minimal' }] },
+        { name: '同事的队列', order: [{ provider: 'alpha', model: 'one' }] },
+      ],
+    }) } })
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    await fresh.mount(page(props))
+
+    const post = seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings'))
+    assert.equal(post.length, 1)
+    const body = post[0].body
+    assert.equal(body.templates.length, 4, '两条原有 + 两条导入')
+    assert.deepEqual(body.templates.slice(0, 2).map((row) => row.id), ['default', 'spare'], '原有的原样留着')
+    const added = body.templates.slice(2)
+    assert.deepEqual(added.map((row) => row.name), ['备用模板 2', '同事的队列'], '撞名加后缀')
+    assert.match(added[0].id, /^i[a-z0-9]+0$/, `id 在本地生成，实际是 ${added[0].id}`)
+    assert.notEqual(added[0].id, 'spare', '不能复用现成的 id')
+    assert.deepEqual(added[0].order, [{ provider: 'delta', model: 'three', reasoningEffort: 'minimal' }], '档位跟着走')
+    assert.equal(body.editedTemplate, added[0].id, '导完切到新模板')
+  } finally {
+    globalThis.fetch = saved
+  }
+})
+
+await check('导入模板：粘贴的不是 JSON、或者里面没有模板，都如实说，不写坏设置', async () => {
+  const fresh = new Runtime()
+  const saved = globalThis.fetch
+  const seen = []
+  globalThis.fetch = async (url, init = {}) => {
+    seen.push({ url: String(url), method: init.method ?? 'GET' })
+    return payloadResponse(initialState())
+  }
+  try {
+    await fresh.mount(page(props))
+    const posts = () => seen.filter((row) => row.method === 'POST' && row.url.endsWith('/settings')).length
+
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
+      .props.onChange({ target: { value: '这不是 JSON' } })
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    await fresh.mount(page(props))
+    let flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
+    assert.ok(flat.includes('importBad'), `坏 JSON 要报出来，实际：${flat.slice(-200)}`)
+    assert.equal(posts(), 0, '坏 JSON 不该写回去')
+
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'import-json')[0]
+      .props.onChange({ target: { value: JSON.stringify({ templates: [{ name: '', order: [] }, { order: [] }] }) } })
+    await fresh.mount(page(props))
+    await fresh.nodes.filter((node) => node.props?.['data-role'] === 'template-import')[0].props.onClick()
+    await fresh.mount(page(props))
+    flat = fresh.nodes.map((node) => String(node.text ?? '')).join(' ')
+    assert.ok(flat.includes('importNothing'), `没有可用模板时要说清，实际：${flat.slice(-200)}`)
+    assert.equal(posts(), 0, '没有可用模板也不该写回去')
+  } finally {
+    globalThis.fetch = saved
+  }
 })
 
 // ── 试连接 ──────────────────────────────────────────────────────────────────

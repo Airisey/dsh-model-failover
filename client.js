@@ -140,6 +140,17 @@ window.__ModuleLoader__.load({
 /* 输出速度：蓝框蓝字，紧跟在模型名后面。跟红/绿胶囊并排，一眼分清「今天行不行」
    和「用起来多快」是两个问题。 */
 .mf-speed { flex: none; border: 1px solid #4c9aff; color: #4c9aff; border-radius: 5px; padding: 0 4px; font-size: 11px; font-variant-numeric: tabular-nums; }
+/* 删除模板的二次确认：紧贴在那颗 ✕ 下面，而不是弹一个覆盖全屏的对话框 ——
+   误点的场景里，视线还在这一行，确认就该长在这一行。 */
+.mf-confirm { display: flex; flex-direction: column; gap: 6px; margin: 2px 8px 6px 38px; padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, #e5484d 45%, transparent); background: color-mix(in srgb, #e5484d 8%, transparent); font-size: 12px; }
+.mf-confirm-row { display: flex; gap: 8px; align-items: center; }
+.mf-danger { border-color: color-mix(in srgb, #e5484d 55%, transparent); color: #e5484d; }
+/* 导入模板用的文本框：粘贴一段 JSON 就行，不碰文件系统。 */
+.mf-json { font: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: inherit; background: color-mix(in srgb, currentColor 5%, transparent); border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 7px; padding: 6px 8px; width: 100%; box-sizing: border-box; min-height: 66px; resize: vertical; }
+/* 被隐藏的路由：它们不在清单里，所以只能单独列出来让人撤销。 */
+.mf-hidden { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.mf-hidden-item { display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px; border-radius: 999px; border: 1px dashed color-mix(in srgb, #e5484d 45%, transparent); font-size: 11.5px; }
+.mf-hidden-item > span { opacity: .8; }
 /* 隔离名单的一行：主行 +（展开时）下面的报错详情。单开一层是为了不动 .mf-row 的
    单行布局 —— 里面塞不下会换行的正文。 */
 .mf-qrow { display: flex; flex-direction: column; }
@@ -293,6 +304,27 @@ window.__ModuleLoader__.load({
         qvSpeedHint: '本会话累计跑出 {tokens} 个输出 token，扣掉排队和首字延迟后用了 {ms} 毫秒',
         qvSpeedHintRuns: '本会话累计 {runs} 趟、共 {tokens} 个输出 token，扣掉排队和首字延迟后用了 {ms} 毫秒',
         qvTemplate: '模板「{name}」',
+        templateDeleteConfirm: '确定删掉模板「{name}」吗？队列里的 {count} 个模型会一起消失。',
+        templateDeleteYes: '删掉',
+        templateDeleteNo: '算了',
+        hiddenTitle: '被隐藏的路由',
+        hiddenHint:
+          '这些路由被整体藏起来了，它们的模型不会出现在上面的「添加模型」里，也不会被队列选中。这一栏就是撤销它的地方 —— 早先这个开关只有配置文件里有，界面看不见，模型「凭空少了一批」时很难查到原因。',
+        hiddenShow: '恢复',
+        exportTemplates: '导出模板',
+        exportHint: '把所有模板导成一段 JSON，复制走就能存下来或者发给别人。',
+        exportCopy: '复制到剪贴板',
+        exportCopied: '已复制到剪贴板',
+        exportSelect: '复制失败，请手动选中下面的文本复制',
+        importTemplates: '导入模板',
+        importHint: '粘贴之前导出的 JSON。导入的模板会**追加**到现有模板后面，同名的会改名，不会覆盖你现在的队列。',
+        importPlaceholder: '在这里粘贴模板 JSON…',
+        importRun: '导入',
+        importEmpty: '还没有粘贴内容。',
+        importBad: '这段内容不是有效的模板 JSON：{message}',
+        importNothing: '里面没有可用的模板。',
+        importDone: '导入了 {count} 个模板。',
+        importLimit: '最多只能有 {max} 个模板，这次只导入了前 {count} 个。',
       },
       en: {
         nav: 'Model Relay',
@@ -436,6 +468,27 @@ window.__ModuleLoader__.load({
         qvSpeedHint: 'This conversation produced {tokens} output tokens in {ms} ms, excluding queueing and time to first token',
         qvSpeedHintRuns: 'This conversation ran {runs} times for {tokens} output tokens in {ms} ms, excluding queueing and time to first token',
         qvTemplate: 'template “{name}”',
+        templateDeleteConfirm: 'Delete the template “{name}”? Its {count} models go with it.',
+        templateDeleteYes: 'Delete',
+        templateDeleteNo: 'Keep it',
+        hiddenTitle: 'Hidden providers',
+        hiddenHint:
+          'These providers are hidden wholesale: their models never appear in “Add model” above and are never picked by a queue. This is where you undo that — the switch used to live only in the config file, so when a batch of models “just disappeared” there was nothing in the UI to point at.',
+        hiddenShow: 'Restore',
+        exportTemplates: 'Export templates',
+        exportHint: 'Turn every template into a block of JSON you can keep or hand to someone else.',
+        exportCopy: 'Copy to clipboard',
+        exportCopied: 'Copied to the clipboard',
+        exportSelect: 'Copy failed — select the text below and copy it by hand',
+        importTemplates: 'Import templates',
+        importHint: 'Paste JSON from an earlier export. Imported templates are **appended** to the ones you have; name clashes get renamed, your current queues are never overwritten.',
+        importPlaceholder: 'Paste template JSON here…',
+        importRun: 'Import',
+        importEmpty: 'Nothing pasted yet.',
+        importBad: 'That is not valid template JSON: {message}',
+        importNothing: 'No usable template in there.',
+        importDone: 'Imported {count} template(s).',
+        importLimit: 'At most {max} templates — only the first {count} were imported.',
       },
     }
 
@@ -645,6 +698,10 @@ window.__ModuleLoader__.load({
       const [probes, setProbes] = useState({})
       /** 正在测哪个模板（空串 = 没有在测）。 */
       const [probingId, setProbingId] = useState('')
+      /** 导入模板的粘贴框内容，以及上一次导入的结果（空串 = 还没导过）。 */
+      const [importText, setImportText] = useState('')
+      const [importNote, setImportNote] = useState('')
+      const [exported, setExported] = useState('')
       const [, setTick] = useState(0)
       const alive = useRef(true)
 
@@ -652,8 +709,10 @@ window.__ModuleLoader__.load({
 
       const load = useCallback(async (scan = false) => {
         try {
-          // 打开设置页顺带扫一次目录：新接进来的 provider、新登录的账号，进来
-          // 就该在清单里，不该先让用户去点一下「重新扫描」。
+          // 打开设置页**不再**顺手扫一遍目录：扫描结果已经落盘，重启 DSH 之后
+          // 还在，要更新就点「重新扫描」。自动扫会让「上次扫到的模型」这种
+          // 跨启动的延续变成一句空话 —— 每次进设置页就重新问一圈 provider，
+          // 慢的时候还要盯着空清单等好几秒。
           const next = scan ? await post('/refresh', {}) : await getState()
           if (!alive.current) return
           setState(next)
@@ -676,7 +735,7 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      useEffect(() => { void load(true) }, [load])
+      useEffect(() => { void load(false) }, [load])
 
       // 倒计时自己走：30 秒重绘一次就够了。
       useEffect(() => {
@@ -834,6 +893,109 @@ window.__ModuleLoader__.load({
         const next = templates.filter((template) => template.id !== id)
         void run('/settings', { templates: next, editedTemplate: next[0].id })
       }, [templates, run])
+
+      /**
+       * 被隐藏的路由（`hiddenProviders`）。
+       *
+       * 这一栏不是可有可无的装饰：`hiddenProviders` 会把整个 provider 从清单里
+       * 拿掉，而它原先只有配置文件里有，界面上看不见。用户遇到「模板里加不了
+       * qoder 的模型」时，屏幕上没有任何线索指向这里。
+       */
+      const hiddenProviders = useMemo(
+        () => (state?.catalogProviders ?? []).filter((row) => row.hidden === true),
+        [state],
+      )
+
+      const restoreProvider = useCallback((id) => {
+        const current = Array.isArray(settings?.hiddenProviders) ? settings.hiddenProviders : []
+        const next = current.filter((row) => row !== id)
+        // 藏起来的路由本来就不在清单里，恢复之后得重新扫一遍才能看到它的模型。
+        void run('/settings', { hiddenProviders: next }).then(() => load(true))
+      }, [settings, run, load])
+
+      /**
+       * 把所有模板导成 JSON。
+       *
+       * 只带模板本身（名字 + 队列），不带任何设置项：这份东西是拿来备份队列、
+       * 或者贴给别人复刻一条队列的，掺进 `hiddenProviders`、重置时刻这些本机
+       * 偏好，导入到别人机器上就成了「顺手改了他的设置」。
+       */
+      const exportAll = useCallback(async () => {
+        const payload = JSON.stringify({
+          plugin: 'dsh-model-failover',
+          version: 1,
+          templates: templates.map((template) => ({
+            name: template.name,
+            order: template.order.map((item) => (
+              item.reasoningEffort === undefined
+                ? { provider: item.provider, model: item.model }
+                : { provider: item.provider, model: item.model, reasoningEffort: item.reasoningEffort }
+            )),
+          })),
+        }, null, 2)
+        setExported(payload)
+        const ok = await copyText(payload)
+        setNotice(ok ? t('exportCopied') : t('exportSelect'))
+      }, [templates, t])
+
+      /**
+       * 把粘贴进来的一段 JSON 追加成模板。
+       *
+       * 追加而不是替换：导入的语义是「把别人的队列搬过来」，不是「覆盖我现在的」。
+       * id 一律在本地重新生成，名字撞了就加后缀 —— 导出的 JSON 里没有 id，正是
+       * 为了让同一份文件能导进任意一台机器而不打架。
+       */
+      const importAll = useCallback(() => {
+        const text = importText.trim()
+        if (text === '') { setImportNote(t('importEmpty')); return }
+        let parsed
+        try {
+          parsed = JSON.parse(text)
+        } catch (failure) {
+          setImportNote(t('importBad', { message: String(failure?.message ?? failure) }))
+          return
+        }
+        const incoming = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.templates) ? parsed.templates : [])
+        const cleaned = []
+        for (const row of incoming) {
+          if (row === null || typeof row !== 'object') continue
+          const name = String(row.name ?? '').trim().slice(0, MAX_TEMPLATE_NAME)
+          if (name === '') continue
+          const order = []
+          for (const item of Array.isArray(row.order) ? row.order : []) {
+            const provider = String(item?.provider ?? '')
+            const model = String(item?.model ?? '')
+            if (provider === '' || model === '') continue
+            const effort = typeof item?.reasoningEffort === 'string' && item.reasoningEffort !== ''
+              ? item.reasoningEffort
+              : undefined
+            order.push(effort === undefined ? { provider, model } : { provider, model, reasoningEffort: effort })
+          }
+          cleaned.push({ name, order })
+        }
+        if (cleaned.length === 0) { setImportNote(t('importNothing')); return }
+        const room = Math.max(0, MAX_TEMPLATES - templates.length)
+        const taken = new Set(templates.map((template) => template.name))
+        const stamp = Date.now().toString(36)
+        const added = cleaned.slice(0, room).map((row, index) => {
+          let name = row.name
+          let suffix = 2
+          while (taken.has(name)) {
+            name = `${row.name.slice(0, MAX_TEMPLATE_NAME - 3)} ${suffix}`.slice(0, MAX_TEMPLATE_NAME)
+            suffix += 1
+          }
+          taken.add(name)
+          return { id: `i${stamp}${index}`, name, order: row.order }
+        })
+        if (added.length === 0) { setImportNote(t('importLimit', { max: MAX_TEMPLATES, count: 0 })); return }
+        const next = [...templates, ...added]
+        void run('/settings', { templates: next, editedTemplate: added[0].id }).then(() => {
+          setImportText('')
+          setImportNote(added.length < cleaned.length
+            ? t('importLimit', { max: MAX_TEMPLATES, count: added.length })
+            : t('importDone', { count: added.length }))
+        })
+      }, [importText, templates, run, t])
 
       /**
        * 把一个模板里的模型挨个试一遍连接。
@@ -1047,6 +1209,57 @@ window.__ModuleLoader__.load({
             }, t('templateAdd')),
             span({ className: 'mf-note' }, t('templateAddHint')),
           ),
+
+          // ── 导出 / 导入 ────────────────────────────────────────────────────
+          // 放在模板卡里，紧挨着它们描述的那些队列 —— 备份和搬迁是同一个
+          // 动作的两半，拆到两个卡片里只会让人各找一半。
+          div({ className: 'mf-note' }, t('exportHint')),
+          div({ className: 'mf-add' },
+            h('button', {
+              type: 'button',
+              className: 'mf-btn',
+              'data-role': 'template-export',
+              disabled: busy || templates.length === 0,
+              onClick: () => void exportAll(),
+            }, t('exportTemplates')),
+            h('button', {
+              type: 'button',
+              className: 'mf-btn',
+              'data-role': 'export-copy',
+              disabled: exported === '',
+              onClick: () => { void copyText(exported).then((ok) => setNotice(ok ? t('exportCopied') : t('exportSelect'))) },
+            }, t('exportCopy')),
+          ),
+          exported === ''
+            ? null
+            : h('textarea', {
+                className: 'mf-json',
+                readOnly: true,
+                'data-role': 'export-json',
+                value: exported,
+                rows: 6,
+                onFocus: (event) => event?.currentTarget?.select?.(),
+              }),
+          div({ className: 'mf-note' }, t('importHint')),
+          h('textarea', {
+            className: 'mf-json',
+            'data-role': 'import-json',
+            placeholder: t('importPlaceholder'),
+            value: importText,
+            rows: 4,
+            disabled: busy,
+            onChange: (event) => setImportText(event.target.value),
+          }),
+          div({ className: 'mf-add' },
+            h('button', {
+              type: 'button',
+              className: 'mf-btn',
+              'data-role': 'template-import',
+              disabled: busy || importText.trim() === '' || templates.length >= MAX_TEMPLATES,
+              onClick: importAll,
+            }, t('importRun')),
+            importNote === '' ? null : span({ className: 'mf-note' }, importNote),
+          ),
         ),
 
         // ── 优先级队列 ──────────────────────────────────────────────────────
@@ -1122,6 +1335,25 @@ window.__ModuleLoader__.load({
               ),
               h('button', { type: 'button', className: 'mf-btn', disabled: busy || addKey === '', onClick: add }, t('add')),
             ),
+            // 「加不了某个 provider 的模型」时，答案往往就在下面这一栏：整个
+            // provider 被 hiddenProviders 藏了，清单里连一行都没有。放在下拉框
+            // 正下方，是因为人正是在这里发现「怎么没有它」的。
+            hiddenProviders.length === 0
+              ? null
+              : div({ className: 'mf-hidden' },
+                  span({ className: 'mf-note' }, `${t('hiddenTitle')} — ${t('hiddenHint')}`),
+                  ...hiddenProviders.map((row) => div({ className: 'mf-hidden-item', key: row.id },
+                    span(null, row.name === '' ? row.id : `${row.name} (${row.id})`),
+                    h('button', {
+                      type: 'button',
+                      className: 'mf-btn',
+                      'data-role': 'hidden-restore',
+                      'data-provider': row.id,
+                      disabled: busy,
+                      onClick: () => restoreProvider(row.id),
+                    }, t('hiddenShow')),
+                  )),
+                ),
         ),
 
         // 这里原来有一张「今日隔离名单」卡片，已经删掉：隔离是按「会话 × 模板」
@@ -1345,14 +1577,25 @@ window.__ModuleLoader__.load({
      */
     function TemplateRow({ template, edited, busy, t, canDelete, onSelect, onRename, onDelete, onProbe, probing }) {
       const [draft, setDraft] = useState(template.name)
+      /**
+       * 删模板要二次确认。
+       *
+       * 删掉一条模板就是删掉一整条队列（十几个模型、连带每行的思考强度），
+       * 而那颗 ✕ 和旁边的「编辑」「测试连接」长得一样、挨得也近，误点一次
+       * 就得重排。确认块就长在这一行下面，视线不用离开。
+       */
+      const [confirming, setConfirming] = useState(false)
       useEffect(() => { setDraft(template.name) }, [template.name])
+      // 换到别的模板、或者这一行不再可删时，把确认块收回去 —— 免得留着
+      // 一个针对旧数据的「删掉」按钮在那儿等人再点一次。
+      useEffect(() => { if (!canDelete) setConfirming(false) }, [canDelete])
       const commit = () => {
         const trimmed = draft.trim().slice(0, MAX_TEMPLATE_NAME)
         if (trimmed === '') { setDraft(template.name); return }
         setDraft(trimmed)
         onRename(trimmed)
       }
-      return div({ className: edited ? 'mf-row mf-row-on' : 'mf-row' },
+      const row = div({ className: edited ? 'mf-row mf-row-on' : 'mf-row' },
         div({ className: 'mf-main' },
           h('input', {
             className: 'mf-text',
@@ -1389,9 +1632,33 @@ window.__ModuleLoader__.load({
             className: 'mf-btn mf-icon',
             'data-role': 'template-delete',
             title: t('templateDelete'),
+            'aria-expanded': confirming ? 'true' : 'false',
             disabled: busy || !canDelete,
-            onClick: onDelete,
+            onClick: () => setConfirming((value) => !value),
           }, '✕'),
+        ),
+      )
+      if (!confirming) return row
+      return div(null,
+        row,
+        div({ className: 'mf-confirm' },
+          div(null, t('templateDeleteConfirm', { name: template.name, count: template.order.length })),
+          div({ className: 'mf-confirm-row' },
+            h('button', {
+              type: 'button',
+              className: 'mf-btn mf-danger',
+              'data-role': 'template-delete-confirm',
+              disabled: busy,
+              onClick: () => { setConfirming(false); onDelete() },
+            }, t('templateDeleteYes')),
+            h('button', {
+              type: 'button',
+              className: 'mf-btn',
+              'data-role': 'template-delete-cancel',
+              disabled: busy,
+              onClick: () => setConfirming(false),
+            }, t('templateDeleteNo')),
+          ),
         ),
       )
     }

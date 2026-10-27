@@ -76,6 +76,14 @@ const SAME_MODEL_RETRIES_HARD_LIMIT = MAX_SAME_MODEL_RETRIES
 const IDLE_TIMEOUT_HARD_LIMIT = MAX_IDLE_TIMEOUT_SEC
 
 /**
+ * 扫描结果落盘的文件名。
+ *
+ * 放在数据目录里、和 settings.json / state.json 并列：它是这个插件的状态，
+ * 不是宿主的。用户点「重新扫描」时它整个被覆盖，进程重启时读回来。
+ */
+const CATALOG_CACHE_FILE = 'catalog.json'
+
+/**
  * 试连接时的输出上限。
  *
  * 试连接只需要证明「连得上、能出字」，不需要它写完一句话。压到 8 个 token，
@@ -300,6 +308,9 @@ export function apply(ctx, _config) {
   const settingsFile = new JsonFile(join(dir, 'settings.json'), undefined, normalizeSettings)
   const stateFile = new JsonFile(join(dir, 'state.json'), undefined, normalizeState)
   const logFile = new JsonFile(join(dir, 'log.json'), undefined, normalizeEventLog)
+  // 扫描结果的落盘位置。normalize 交给 Catalog 自己做 —— 缓存形状的知识
+  // 属于它，写在这里等于把同一份结构在两个文件里各维护一遍。
+  const cacheFile = new JsonFile(join(dir, CATALOG_CACHE_FILE), undefined, (raw) => raw)
 
   /** 追加一条事件。只在真正发生状态变化时调用，避免每次成功都写盘。 */
   const pushEvent = (event) => {
@@ -320,6 +331,7 @@ export function apply(ctx, _config) {
     llm: ctx.llm,
     hiddenProviders: () => settingsFile.get().hiddenProviders,
     logger: { warn: (message) => logger.warn?.(message) },
+    cacheFile,
   })
 
   /**
@@ -399,6 +411,26 @@ export function apply(ctx, _config) {
   }
 
   /**
+   * 启动时**不重扫**：清单已经落盘，直接用它。
+   *
+   * 扫描要问一圈 provider，慢的时候能把启动拖住好几秒；而「上次扫到的模型」
+   * 隔一夜基本还是那些。所以只有三种情况才真的去扫：
+   *   1. 从来没扫过（缓存为空，第一次装插件）；
+   *   2. 用户自己点了「重新扫描」（`POST /refresh`）；
+   *   3. 恢复了一个被隐藏的路由（不重扫就看不到它的模型）。
+   */
+  const start = async () => {
+    if (catalog.cached().length === 0) {
+      await refresh()
+    }
+    await bootstrap()
+  }
+
+  void start().catch((error) => {
+    logger.warn?.(`model-failover: 启动扫描失败 — ${String(error?.message ?? error)}`)
+  })
+
+  /**
    * 试一次「这个 provider + model 现在能不能出字」。
    *
    * 走 `ctx.llm` 直连供应商，**刻意不经过本插件的接力路由**：试连接是一次
@@ -455,12 +487,6 @@ export function apply(ctx, _config) {
       message: String(failure.message ?? '').slice(0, 200),
     }
   }
-
-  void refresh()
-    .then(() => bootstrap())
-    .catch((error) => {
-      logger.warn?.(`model-failover: 启动扫描失败 — ${String(error?.message ?? error)}`)
-    })
 
   // ── 设置页 API ────────────────────────────────────────────────────────────
   /**
@@ -547,6 +573,9 @@ export function apply(ctx, _config) {
       }),
       catalogErrors: catalog.errors,
       catalogScannedAt: catalog.at,
+      // 所有路由（含被隐藏的）。设置页要靠它画出「这条路由被隐藏了」，
+      // 并让人一键撤销 —— 否则被隐藏的路由连清单都不在，用户根本无从发现。
+      catalogProviders: catalog.providers,
       quarantined: view.quarantined.map(decorate),
       good: view.good.map(decorate),
       // 每模型当天的失败/成功次数（所有会话、所有模板合计）——设置页队列前面
@@ -793,6 +822,7 @@ export function apply(ctx, _config) {
       settingsFile.dispose()
       stateFile.dispose()
       logFile.dispose()
+      cacheFile.dispose()
       try {
         registration?.()
       } catch {

@@ -188,8 +188,9 @@ function createLlm(scripts) {
  * @param {Map<string, () => AsyncGenerator<any>>} spec.scripts
  * @param {object} [spec.settings]
  * @param {number} [spec.at] - 初始「现在」。
+ * @param {object} [spec.cacheFile] - 扫描缓存落盘用的 JsonFile（验跨启动延续时才给）。
  */
-async function harness({ order, scripts, settings: overrides = {}, at = new Date(2026, 1, 14, 6, 0, 0).getTime() }) {
+async function harness({ order, scripts, settings: overrides = {}, at = new Date(2026, 1, 14, 6, 0, 0).getTime(), cacheFile }) {
   const llm = createLlm(scripts)
   llm.register('alpha', [{ id: 'one', name: 'Alpha One' }, { id: 'two', name: 'Alpha Two' }])
   llm.register('beta', [{ id: 'one', name: 'Beta One' }, { id: 'two', name: 'Beta Two' }])
@@ -215,7 +216,7 @@ async function harness({ order, scripts, settings: overrides = {}, at = new Date
     new JsonFile(join(HOME, `state-${Math.random().toString(36).slice(2)}.json`), undefined, normalizeState),
   )
 
-  const catalog = new Catalog({ llm, hiddenProviders: () => [], logger: {} })
+  const catalog = new Catalog({ llm, hiddenProviders: () => [], logger: {}, cacheFile })
   await catalog.refresh()
   await catalog.fillModelFacts()
 
@@ -1572,6 +1573,61 @@ await check('宿主半身：注册路由 + 设置接口读写 + 队列自动填�
     process.env.DSH_HOME = previous
     rmSync(freshHome, { recursive: true, force: true })
   }
+})
+
+// 13.4 · 扫描结果跨启动延续
+// 「每次关掉 dsh 就重新扫一遍」既慢又没必要：清单一夜之间基本不变。这里验的
+// 是落盘那一半 —— 第二个 Catalog 实例（相当于下一次启动）什么都不问，直接从
+// 磁盘把清单、档位表、被隐藏的路由全拿回来。
+
+await check('扫描结果落盘：下一个进程不再问宿主，清单与档位表原样回来', async () => {
+  const cacheFile = new JsonFile(join(HOME, `catalog-${Math.random().toString(36).slice(2)}.json`), undefined, (raw) => raw)
+  const llm = createLlm(new Map())
+  llm.register('alpha', [{ id: 'one', name: 'Alpha One' }])
+  llm.register('beta', [{ id: 'one', name: 'Beta One' }])
+  // 宿主的 `resolveModelInfo` 把窗口放在 `context.contextWindow` 里（不是顶层）。
+  llm.resolveModelInfo = async (provider, model) => (model === 'one'
+    ? { provider, model, reasoning: { efforts: [{ id: 'low', name: '低' }], defaultEffort: 'low' }, context: { contextWindow: 128_000 } }
+    : undefined)
+  let asked = 0
+  const counting = {
+    listProviders: () => { asked += 1; return llm.listProviders() },
+    listModels: (provider) => llm.listModels(provider),
+    resolveModelInfo: (...args) => llm.resolveModelInfo(...args),
+  }
+
+  const first = new Catalog({ llm: counting, hiddenProviders: () => ['beta'], logger: {}, cacheFile })
+  await first.refresh()
+  await first.fillModelFacts()
+  cacheFile.flush()
+  assert.equal(asked, 1, '第一次当然要问')
+  assert.deepEqual(first.providers.map((row) => `${row.id}:${row.hidden}`), ['alpha:false', 'beta:true'], '被隐藏的路由也要记下来')
+  assert.equal(first.reasoningFor('alpha', 'one')?.efforts.length, 1, '档位表也该落盘')
+
+  // 第二个实例 = 下一次启动：宿主还没挂完也不影响，清单从磁盘来。
+  const second = new Catalog({ llm: counting, hiddenProviders: () => ['beta'], logger: {}, cacheFile })
+  assert.equal(asked, 1, '恢复时不该再问宿主')
+  // beta 被隐藏，所以它只在 providers 里留个记号，不进候选清单。
+  assert.deepEqual(second.cached().map((row) => routeKey(row.provider, row.model)), [routeKey('alpha', 'one')])
+  assert.equal(second.reasoningFor('alpha', 'one')?.efforts.length, 1, '档位表一起回来')
+  assert.equal(second.contextWindow('alpha', 'one'), 128_000)
+  assert.deepEqual(second.providers.map((row) => `${row.id}:${row.hidden}`), ['alpha:false', 'beta:true'])
+
+  // 用户点了「重新扫描」才会真的再问一次。
+  await second.refresh()
+  assert.equal(asked, 2, 'refresh() 才去问宿主')
+})
+
+await check('扫描缓存坏了就当没有：不让一个写坏的 json 把清单清空', async () => {
+  const cacheFile = new JsonFile(join(HOME, `catalog-${Math.random().toString(36).slice(2)}.json`), undefined, (raw) => raw)
+  cacheFile.replace({ version: 999, entries: [{ provider: 'ghost', model: 'x' }] })
+  cacheFile.flush()
+  const llm = createLlm(new Map())
+  llm.register('alpha', [{ id: 'one', name: 'Alpha One' }])
+  const catalog = new Catalog({ llm, hiddenProviders: () => [], logger: {}, cacheFile })
+  assert.deepEqual(catalog.cached(), [], '版本对不上就该当作没缓存')
+  await catalog.refresh()
+  assert.equal(catalog.cached().length, 1, '重新扫一遍就有了')
 })
 
 // 13.5 · 轮尾便签：适配器那一半的配对
