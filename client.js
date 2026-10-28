@@ -14,8 +14,9 @@
  *     服务，见 dsh-client-ui-settings 的说明）。
  *
  * 平台没有提供任何拖拽/排序控件（整个 client-ui-primitives 里没有任何
- * Reorder/Sortable/DragHandle），所以排序用最朴素的 ↑ / ↓ 按钮，配上自己的
- * 样式表 —— 与 dsh-our-free-model 等现有插件同样的做法。
+ * Reorder/Sortable/DragHandle），所以排序直接用浏览器原生的 HTML5 拖放
+ * （draggable + dragstart/dragover/drop），不引第三方库 —— 这个 bundle 里
+ * 能 require 的只有 react。
  */
 
 window.__ModuleLoader__.load({
@@ -66,6 +67,13 @@ window.__ModuleLoader__.load({
 .mf-kv > b { font-weight: 600; }
 .mf-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; }
 .mf-row:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
+/* 排序靠拖：这一行整体都是把手。左边那个 ⠿ 只是把「可以拖」这件事说出口。 */
+.mf-row[draggable='true'] { cursor: grab; }
+.mf-grip { flex: none; cursor: grab; opacity: .35; user-select: none; font-size: 13px; line-height: 1; }
+.mf-row:hover .mf-grip { opacity: .6; }
+/* 正被拖走的那一行淡下去，落点那一行顶上画一条线。 */
+.mf-row.mf-drag-src { opacity: .4; }
+.mf-row.mf-drop { box-shadow: inset 0 2px 0 currentColor; }
 .mf-idx { width: 20px; text-align: right; opacity: .5; font-variant-numeric: tabular-nums; }
 .mf-main { flex: 1; min-width: 0; }
 .mf-name { display: flex; align-items: center; font-weight: 500; }
@@ -201,14 +209,13 @@ window.__ModuleLoader__.load({
         failCountHint: '今天这个模型一共失败了几次（所有会话合计）',
         goodCountHint: '今天这个模型成功了几次（所有会话合计）',
         queueHint:
-          '靠前的优先使用。↑ / ↓ 调整顺序，✕ 移出队列；右栏给每个模型挑它这一轮用的思考强度，档位就是平时直接选它时能选的那几档。',
+          '靠前的优先使用。按住某一行拖到新位置就能改顺序，✕ 移出队列；右栏给每个模型挑它这一轮用的思考强度，档位就是平时直接选它时能选的那几档。',
         effortDefault: '默认档位',
         effortUnknown: '档位待扫描',
         effortNone: '无档位',
         effortHint: '「默认档位」＝这个模型平时的档位（不指定）；档位表由模型自己提供。',
         queueEmpty: '队列是空的。从下面挑一个模型加进来，或者点「重新扫描」。',
-        moveUp: '上移',
-        moveDown: '下移',
+        gripHint: '按住拖动，改这条队列的顺序',
         remove: '移出队列',
         addModel: '从已接入的模型里添加…',
         add: '添加',
@@ -360,14 +367,13 @@ window.__ModuleLoader__.load({
         failCountHint: 'How many times this model failed today (all conversations)',
         goodCountHint: 'How many times this model succeeded today (all conversations)',
         queueHint:
-          'Earlier entries are tried first. Use ↑ / ↓ to reorder, ✕ to remove; the right column picks the reasoning effort each model uses — the same levels you get when you pick that model directly.',
+          'Earlier entries are tried first. Drag a row to a new position to reorder, ✕ to remove; the right column picks the reasoning effort each model uses — the same levels you get when you pick that model directly.',
         effortDefault: 'Default effort',
         effortUnknown: 'Effort unknown',
         effortNone: 'No effort',
         effortHint: '"Default effort" keeps the model’s own level (nothing is specified); the levels come from the model itself.',
         queueEmpty: 'The queue is empty. Add a model below, or press Rescan.',
-        moveUp: 'Move up',
-        moveDown: 'Move down',
+        gripHint: 'Drag to reorder this queue',
         remove: 'Remove',
         addModel: 'Add a connected model…',
         add: 'Add',
@@ -798,6 +804,22 @@ window.__ModuleLoader__.load({
       const countsOf = useCallback((key) => (state?.counts ?? {})[key] ?? undefined, [state])
 
       /**
+       * 正在拖的队列行：`{ from, over }`，没在拖时是 null。
+       *
+       * `from` 同时留了一份在 ref 里 —— drop 那一刻读到的 `drag` 可能是上一次
+       * 渲染的闭包，而 ref 永远是最新的；`over` 只用来画落点线，必须触发重渲染，
+       * 所以那个留在 state 里。
+       */
+      const [drag, setDrag] = useState(null)
+      const dragFromRef = useRef(-1)
+      const dragging = drag ?? { from: -1, over: -1 }
+
+      const stopDrag = useCallback(() => {
+        dragFromRef.current = -1
+        setDrag(null)
+      }, [])
+
+      /**
        * 今日隔离（跨会话、跨模板）的条数。
        *
        * 设置页不再列名单了 —— 隔离是按「会话 × 模板」算的，一页表格说不清
@@ -842,12 +864,18 @@ window.__ModuleLoader__.load({
         })
       }, [editedTemplate, templates, run])
 
-      const move = useCallback((index, delta) => {
-        const target = index + delta
-        if (target < 0 || target >= order.length) return
+      /**
+       * 把第 from 项挪到第 to 项的位置（拖动排序）。
+       *
+       * 只在这一项真正换了位置时才写回：拖到自己身上、或者下标越界，都不该
+       * 白发一次 POST —— 顺手的抖动很常见。
+       */
+      const reorder = useCallback((from, to) => {
+        if (from === to) return
+        if (from < 0 || to < 0 || from >= order.length || to >= order.length) return
         const next = [...order]
-        const [item] = next.splice(index, 1)
-        next.splice(target, 0, item)
+        const [item] = next.splice(from, 1)
+        next.splice(to, 0, item)
         mutateOrder(next)
       }, [order, mutateOrder])
 
@@ -1282,7 +1310,55 @@ window.__ModuleLoader__.load({
               const hit = (state.catalog ?? []).find((row) => row.provider === item.provider && row.model === item.model)
               const tally = countsOf(key)
               const probeRow = probes[key]
-              return div({ className: 'mf-row', key },
+              const className = [
+                'mf-row',
+                dragging.from === index ? 'mf-drag-src' : '',
+                dragging.over === index && dragging.from !== index ? 'mf-drop' : '',
+              ].filter((part) => part !== '').join(' ')
+              return div({
+                className,
+                key,
+                'data-role': 'queue-row',
+                'data-index': String(index),
+                // 整行都是把手 —— 用户就是要把「框框」拖着走。busy 时不给拖，
+                // 免得和正在提交的那次写回打架。
+                draggable: busy ? undefined : true,
+                onDragStart: (event) => {
+                  // 从下拉框、按钮、输入框上按下时不算拖行：那几下是在操作控件。
+                  const tag = String(event?.target?.tagName ?? '').toUpperCase()
+                  if (tag === 'SELECT' || tag === 'BUTTON' || tag === 'INPUT' || tag === 'OPTION') {
+                    event?.preventDefault?.()
+                    return
+                  }
+                  dragFromRef.current = index
+                  setDrag({ from: index, over: index })
+                  if (event?.dataTransfer !== undefined) {
+                    event.dataTransfer.effectAllowed = 'move'
+                    // 有些浏览器非要有数据才肯开始拖；内容本身不用，索引在 ref 里。
+                    event.dataTransfer.setData?.('text/plain', String(index))
+                  }
+                },
+                onDragOver: (event) => {
+                  if (dragFromRef.current < 0) return
+                  // 不 preventDefault 浏览器就当这里不接受拖放，drop 根本不会来。
+                  event?.preventDefault?.()
+                  if (event?.dataTransfer !== undefined) event.dataTransfer.dropEffect = 'move'
+                  setDrag((previous) => (previous === null || previous.over === index ? previous : { ...previous, over: index }))
+                },
+                onDragLeave: () => {
+                  setDrag((previous) => (
+                    previous === null || previous.over !== index ? previous : { ...previous, over: previous.from }
+                  ))
+                },
+                onDrop: (event) => {
+                  event?.preventDefault?.()
+                  const from = dragFromRef.current
+                  stopDrag()
+                  reorder(from, index)
+                },
+                onDragEnd: stopDrag,
+              },
+                span({ className: 'mf-grip', title: t('gripHint'), 'data-role': 'queue-grip' }, '⠿'),
                 span({ className: 'mf-idx' }, String(index + 1)),
                 // 今天这个模型在全机器上失败了几次、成了几次。红的是失败、绿的是
                 // 成功 —— 它是**统计**，不是隔离状态：隔离按「会话 × 模板」算，
@@ -1326,8 +1402,6 @@ window.__ModuleLoader__.load({
                           )),
                         )),
                 div({ className: 'mf-actions' },
-                  h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveUp'), disabled: busy || index === 0, onClick: () => move(index, -1) }, '↑'),
-                  h('button', { type: 'button', className: 'mf-btn mf-icon', title: t('moveDown'), disabled: busy || index === order.length - 1, onClick: () => move(index, 1) }, '↓'),
                   h('button', { type: 'button', className: 'mf-btn mf-icon', 'data-role': 'queue-remove', title: t('remove'), disabled: busy, onClick: () => removeAt(index) }, '✕'),
                 ),
               )

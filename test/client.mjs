@@ -227,7 +227,7 @@ class Runtime {
     return this.find((node) => node.tag === 'button' && node.text === text)
   }
 
-  /** 按纯文本找**可用**的按钮（首行的 ↑ 是禁用的，要找的是第二行的）。 */
+  /** 按纯文本找**可用**的按钮。 */
   enabledButton(text) {
     return this.find((node) => node.tag === 'button' && node.text === text && node.props.disabled !== true)
   }
@@ -1470,11 +1470,39 @@ await check('把档位改回「默认档位」：这一项不再带 reasoningEff
   assert.equal('reasoningEffort' in body.templates[0].order[0], false, '「默认档位」= 不发这个字段，用模型平时的档位')
 })
 
-await check('↑ 把第二个候选与第一个交换，并 POST 完整的新顺序', async () => {
+/**
+ * 队列行的拖放。
+ *
+ * 假 DOM 不会自己发 drag 事件，所以直接调 props 上的那几个回调 —— 它们就是
+ * 真实浏览器会调的那几个。`dataTransfer` 用一个只记账的替身。
+ */
+const queueRows = () => runtime.nodes.filter((node) => node.props?.['data-role'] === 'queue-row')
+const dragEvent = (tagName = 'DIV') => ({
+  target: { tagName },
+  dataTransfer: { effectAllowed: '', dropEffect: '', setData() {} },
+  preventDefault() {},
+  stopPropagation() {},
+})
+
+await check('拖动队列行就能改顺序，并 POST 完整的新顺序', async () => {
   const before = requests.length
-  assert.equal(runtime.button('↑').props.disabled, true, '第一行的 ↑ 应该是禁用的')
-  await runtime.enabledButton('↑').props.onClick()
+  assert.equal(queueRows().length, 3, '三行候选各是一个可拖的框')
+  assert.equal(queueRows()[0].props.draggable, true, '整行都该能拖')
+  assert.equal(queueRows()[0].props['data-index'], '0')
+
+  // 把第二行（beta）拖到第一行（alpha）头上。
+  queueRows()[1].props.onDragStart(dragEvent())
   await runtime.mount(page(props))
+  assert.equal(queueRows()[1].props.className.includes('mf-drag-src'), true, '被拖的那行应该淡下去')
+
+  await queueRows()[0].props.onDragOver(dragEvent())
+  await runtime.mount(page(props))
+  assert.equal(queueRows()[0].props.className.includes('mf-drop'), true, '落点那一行应该画线')
+
+  await queueRows()[0].props.onDrop(dragEvent())
+  await runtime.mount(page(props))
+  assert.equal(queueRows()[0].props.className.includes('mf-drag-src'), false, '放下之后高亮要收干净')
+  assert.equal(queueRows()[0].props.className.includes('mf-drop'), false, '落点线也要收干净')
 
   const posts = requests.slice(before).filter((row) => row.method === 'POST')
   assert.equal(posts.length, 1, '应只发一个 POST')
@@ -1494,6 +1522,41 @@ await check('↑ 把第二个候选与第一个交换，并 POST 完整的新顺
     ],
   })
   assert.deepEqual(current.settings.templates[0].order.map((row) => row.provider), ['beta', 'alpha', 'gamma'])
+})
+
+await check('拖着不动、或者拖到自己身上，都不写回设置', async () => {
+  const before = requests.length
+  queueRows()[1].props.onDragStart(dragEvent())
+  await runtime.mount(page(props))
+  await queueRows()[1].props.onDrop(dragEvent())
+  await runtime.mount(page(props))
+
+  assert.equal(
+    requests.slice(before).filter((row) => row.method === 'POST').length,
+    0,
+    '原地放下不该发 POST',
+  )
+})
+
+await check('从下拉框 / 按钮上按下不算拖行，拖完必须收干净', async () => {
+  const before = requests.length
+  // 在下拉框上按住鼠标：不该开始拖。
+  queueRows()[2].props.onDragStart(dragEvent('SELECT'))
+  await runtime.mount(page(props))
+  assert.equal(queueRows()[2].props.className.includes('mf-drag-src'), false, '从控件上按下不该开始拖')
+
+  // 真的开始拖之后又反悔（dragend），状态也要收干净。
+  queueRows()[0].props.onDragStart(dragEvent())
+  await runtime.mount(page(props))
+  assert.equal(queueRows()[0].props.className.includes('mf-drag-src'), true)
+  queueRows()[0].props.onDragEnd()
+  await runtime.mount(page(props))
+  assert.equal(queueRows()[0].props.className.includes('mf-drag-src'), false, 'dragend 之后要收干净')
+  assert.equal(
+    requests.slice(before).filter((row) => row.method === 'POST').length,
+    0,
+    '没放下就别写回',
+  )
 })
 
 await check('✕ 把这一行移出队列', async () => {
