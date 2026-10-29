@@ -405,9 +405,17 @@ export function apply(ctx, _config) {
     logger.info?.(`model-failover: 已把 ${order.length} 个已接入的模型排进「${template.name}」，可在设置页调整顺序`)
   }
 
-  /** 扫完目录顺手补齐上下文窗口与档位表，失败不影响任何功能。 */
-  const refresh = async () => {
+  /**
+   * 扫完目录顺手补齐上下文窗口与档位表，失败不影响任何功能。
+   *
+   * `relearn` 为真时先把「已经问过宿主」的记忆清掉，让这一轮重新问一遍 ——
+   * 用户改完 `cordis.patch.yml`（比如补上某个模型的 `reasoningEfforts`）之后
+   * 点「重新扫描」，指望的就是这个。不传的调用方（启动、恢复隐藏路由）沿用
+   * 旧记忆，免得每次启动都去把上百个模型问一遍。
+   */
+  const refresh = async ({ relearn = false } = {}) => {
     const entries = await catalog.refresh()
+    if (relearn) catalog.forgetAsked()
     await catalog.fillModelFacts()
     return entries
   }
@@ -710,7 +718,10 @@ export function apply(ctx, _config) {
       }
 
       if (method === 'POST' && path === '/refresh') {
-        await refresh()
+        // 用户主动点的「重新扫描」= 连宿主的答案一起重新要一遍。只重列清单
+        // 是不够的：档位表和上下文窗口都是问 `resolveModelInfo` 得来的，
+        // 不清 `asked` 就不会重问，改完配置也看不出任何变化。
+        await refresh({ relearn: true })
         await bootstrap()
         sendJson(res, 200, snapshot(now))
         return

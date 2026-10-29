@@ -1634,6 +1634,35 @@ await check('扫描结果落盘：下一个进程不再问宿主，清单与档�
   assert.equal(asked, 2, 'refresh() 才去问宿主')
 })
 
+await check('宿主改口之后「重新扫描」能重新问到档位：asked 不是永久结论', async () => {
+  const cacheFile = new JsonFile(join(HOME, `catalog-${Math.random().toString(36).slice(2)}.json`), undefined, (raw) => raw)
+  const llm = createLlm(new Map())
+  llm.register('wusrouter', [{ id: 'flash', name: 'DeepSeek Flash' }])
+  // 第一轮：宿主说这个模型没有档位（配置里还没写 reasoningEfforts）。
+  let efforts = undefined
+  llm.resolveModelInfo = async (provider, model) => ({ provider, model, ...(efforts === undefined ? {} : { reasoning: efforts }) })
+  const catalog = new Catalog({ llm, hiddenProviders: () => [], logger: {}, cacheFile })
+  await catalog.refresh()
+  await catalog.fillModelFacts()
+  assert.equal(catalog.reasoningFor('wusrouter', 'flash'), undefined, '宿主说没有')
+  assert.equal(catalog.reasoningKnown('wusrouter', 'flash'), true, '但已经问过了')
+
+  // 用户去 cordis.patch.yml 里补上档位，宿主从此改口。
+  efforts = { efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高' }], defaultEffort: 'low' }
+
+  // 只重扫、不清记忆：还是旧结论 —— 这正是线上那个「怎么重启都显示无档位」。
+  await catalog.refresh()
+  await catalog.fillModelFacts()
+  assert.equal(catalog.reasoningFor('wusrouter', 'flash'), undefined, '不清 asked 就永远问不到')
+
+  // 用户点「重新扫描」= 宿主那边也重新问一遍。
+  catalog.forgetAsked()
+  await catalog.refresh()
+  await catalog.fillModelFacts()
+  assert.equal(catalog.reasoningFor('wusrouter', 'flash')?.efforts.length, 2, '重问之后档位就回来了')
+  assert.equal(catalog.reasoningFor('wusrouter', 'flash')?.defaultEffort, 'low')
+})
+
 await check('扫描缓存坏了就当没有：不让一个写坏的 json 把清单清空', async () => {
   const cacheFile = new JsonFile(join(HOME, `catalog-${Math.random().toString(36).slice(2)}.json`), undefined, (raw) => raw)
   cacheFile.replace({ version: 999, entries: [{ provider: 'ghost', model: 'x' }] })
